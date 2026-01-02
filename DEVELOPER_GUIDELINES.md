@@ -32,6 +32,49 @@ This document provides practical guidance for developers building clients, opera
 | Operator Guide | Deployment, configuration, operations |
 | Client Implementation Guide | UX requirements, offline behavior, platform specifics |
 
+### 1.4 REFERENCE TECH STACK
+
+While the protocol is implementation-agnostic, the reference implementation uses the following stack. Contributors are encouraged to stick to these choices to ensure compatibility and maintainability.
+
+## Frontend (Client)
+
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| Framework | Flutter / Dart | Cross-platform (iOS/Android) |
+| Crypto/MLS | Rust Bridge (`flutter_rust_bridge` + `openmls`) | REQUIRED for secure MLS implementation |
+| State | Riverpod | Asynchronous state management |
+| Database | Drift (SQLite) | Type-safe persistence for encrypted history |
+| Media | LiveKit Client | WebRTC abstraction with MLS key distribution |
+| Map | flutter_map | Open source map rendering |
+
+## Backend (Relay)
+
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| Framework | Khatru | Customizable framework for building relays |
+| Logic | Custom Go Implementation | NIP-29 Group state management |
+| Storage | Postgres | Relational data integrity |
+
+## Backend (Sidecar)
+
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| Language | Go | High concurrency, type safety |
+| Framework | Chi v5 | Lightweight HTTP routing |
+| MLS Logic | Rust Microservice (gRPC + `openmls`) | REQUIRED Validation of MLS Epochs |
+| Communication | gRPC / Protobuf | Type-safe interface between Go and Rust |
+| Nostr | `nbd-wtf/go-nostr` | Standard Go Nostr library |
+| Cache | Redis | Token replay protection and MLS state |
+
+## Infrastructure
+
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| Media Storage | Blossom Server (`hzrd149/blossom-server`) | Dockerized media storage |
+| Media Server | LiveKit Server | WebRTC SFU for real-time voice/video |
+| Reverse Proxy | Traefik | TLS termination, WebSocket routing, dashboard |
+| Orchestration | Docker Compose | Unified local development |
+
 ---
 
 ## 2. ARCHITECTURE OVERVIEW
