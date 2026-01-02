@@ -1,0 +1,625 @@
+openapi: 3.0.3
+info:
+  title: Synchrono City Sidecar API
+  description: |
+    REST API for Synchrono City Sidecar service.
+    Bridges Nostr authentication with LiveKit and MLS operations.
+  version: 1.0.0
+
+servers:
+  - url: https://sidecar.synchrono.city
+    description: Production sidecar
+
+security:
+  - NIP98Auth: []
+
+tags:
+  - name: Health
+    description: Health check and status
+  - name: Token
+    description: LiveKit token issuance
+  - name: MLS
+    description: MLS operations
+  - name: Proxy
+    description: External request proxying
+  - name: Assets
+    description: Static asset serving for web client
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns service health and current time for clock sync
+      operationId: health
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          headers:
+            Date:
+              description: Server time for clock sync validation
+              schema:
+                type: string
+                format: date-time
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+                  uptime:
+                    type: integer
+                    description: Uptime in seconds
+
+  /token/group:
+    post:
+      summary: Get LiveKit token for group call
+      description: |
+        Issues a single-use LiveKit room token for joining a group call.
+        Token is returned wrapped in a NIP-59 Gift Wrap event for privacy.
+      operationId: getGroupToken
+      tags: [Token]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_id, call_id]
+              properties:
+                group_id:
+                  type: string
+                  description: NIP-29 group identifier
+                  example: "central-park-chats"
+                call_id:
+                  type: string
+                  description: Kind 1020 event ID
+                  example: "abc123..."
+                video:
+                  type: boolean
+                  description: Whether to request video permissions
+                  default: true
+      responses:
+        '200':
+          description: Token issued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [gift_wrap]
+                properties:
+                  gift_wrap:
+                    type: string
+                    description: Base64-encoded NIP-59 Gift Wrap containing token
+                    example: "eyJldmVudCI6eyJraW5kIjoxMDU5..."
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid NIP-98 authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: User not in group or blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Call not found or ended
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /token/dm:
+    post:
+      summary: Get LiveKit token for DM call
+      description: |
+        Issues a single-use LiveKit room token for a 1:1 DM call.
+        Token is returned wrapped in a NIP-59 Gift Wrap event.
+      operationId: getDMToken
+      tags: [Token]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [call_offer_id, peer_pubkey]
+              properties:
+                call_offer_id:
+                  type: string
+                  description: Kind 20010 event ID
+                  example: "def456..."
+                peer_pubkey:
+                  type: string
+                  description: Peer's public key
+                  example: "79be2..."
+                video:
+                  type: boolean
+                  description: Whether to request video permissions
+                  default: true
+      responses:
+        '200':
+          description: Token issued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [gift_wrap]
+                properties:
+                  gift_wrap:
+                    type: string
+                    description: Base64-encoded NIP-59 Gift Wrap containing token
+                    example: "eyJldmVudCI6eyJraW5kIjoxMDU5..."
+        '400':
+          description: Invalid request
+        '401':
+          description: Invalid NIP-98 authentication
+        '403':
+          description: Peer has blocked caller
+        '404':
+          description: Call offer not found
+
+  /mls/welcome/{group_id}:
+    post:
+      summary: Get MLS Welcome message for new participant
+      description: |
+        Returns the MLS Welcome message needed to add a new participant
+        to an existing group call.
+      operationId: getMLSWelcome
+      tags: [MLS]
+      parameters:
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: LiveKit room ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_package]
+              properties:
+                key_package:
+                  type: string
+                  format: byte
+                  description: Base64-encoded MLS Key Package of new participant
+                  example: "mIGZ..."
+      responses:
+        '200':
+          description: Welcome message generated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [welcome]
+                properties:
+                  welcome:
+                    type: string
+                    format: byte
+                    description: Base64-encoded MLS Welcome message
+                    example: "mIGZ..."
+        '400':
+          description: Invalid key package
+        '404':
+          description: Room not found
+
+  /mls/state/{group_id}:
+    get:
+      summary: Get current MLS group state
+      description: |
+        Returns the current MLS state for a group call.
+        Used for recovery after epoch mismatch.
+      operationId: getMLSState
+      tags: [MLS]
+      parameters:
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: LiveKit room ID
+      responses:
+        '200':
+          description: MLS state retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [epoch, members, epoch_leader]
+                properties:
+                  epoch:
+                    type: integer
+                    description: Current MLS epoch
+                    example: 5
+                  members:
+                    type: array
+                    items:
+                      type: string
+                    description: Member public keys
+                    example: ["79be2...", "f2a8b..."]
+                  epoch_leader:
+                    type: string
+                    description: Current epoch leader pubkey
+                    example: "79be2..."
+                  group_state:
+                    type: string
+                    format: byte
+                    description: Base64-encoded MLS group state (optional)
+        '404':
+          description: Room not found
+
+  /proxy/blossom:
+    post:
+      summary: Proxy Blossom upload/download
+      description: |
+        Proxies requests to Blossom servers to hide user IP.
+        Supports both upload (POST) and download (GET).
+      operationId: proxyBlossom
+      tags: [Proxy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, url]
+              properties:
+                action:
+                  type: string
+                  enum: [upload, download]
+                  description: Blossom action
+                url:
+                  type: string
+                  format: uri
+                  description: Full Blossom server URL
+                  example: "https://blossom.synchrono.city/upload"
+                method:
+                  type: string
+                  enum: [GET, POST, DELETE, HEAD]
+                  description: HTTP method for request
+                  default: POST
+                headers:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Headers to forward (excluding auth)
+                body:
+                  type: string
+                  format: byte
+                  description: Request body for uploads
+      responses:
+        '200':
+          description: Proxied request successful
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, body]
+                properties:
+                  status:
+                    type: integer
+                    description: HTTP status code from Blossom
+                  headers:
+                    type: object
+                    additionalProperties:
+                      type: string
+                    description: Response headers
+                  body:
+                    type: string
+                    format: byte
+                    description: Response body
+        '400':
+          description: Invalid request
+        '502':
+          description: Blossom server error
+
+  /proxy/link:
+    post:
+      summary: Proxy link preview fetch
+      description: |
+        Fetches URL metadata for link previews while hiding user IP.
+      operationId: proxyLink
+      tags: [Proxy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  description: URL to fetch
+                  example: "https://example.com/article"
+      responses:
+        '200':
+          description: Link metadata retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+                    description: Canonical URL
+                  title:
+                    type: string
+                    description: Page title
+                  description:
+                    type: string
+                    description: Page description
+                  image:
+                    type: string
+                    description: Open Graph image URL
+                  favicon:
+                    type: string
+                    description: Favicon URL
+        '400':
+          description: Invalid URL
+        '502':
+          description: Fetch error
+
+  /webhook/nip29:
+    post:
+      summary: NIP-29 webhook handler
+      description: |
+        Receives webhooks from relay for group events.
+        Used to trigger LiveKit room management.
+      operationId: nip29Webhook
+      tags: [Webhooks]
+      security:
+        []: []  # Authenticated via shared secret
+      parameters:
+        - name: X-Webhook-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Shared secret for webhook verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type, event]
+              properties:
+                event_type:
+                  type: string
+                  enum: [group_created, member_added, member_removed, metadata_changed]
+                  description: Type of group event
+                event:
+                  $ref: '#/components/schemas/NostrEvent'
+      responses:
+        '202':
+          description: Webhook accepted
+        '401':
+          description: Invalid webhook secret
+
+  /webhook/livekit:
+    post:
+      summary: LiveKit webhook handler
+      description: |
+        Receives webhooks from LiveKit for room events.
+        Used to update MLS state and handle leadership transfer.
+      operationId: livekitWebhook
+      tags: [Webhooks]
+      security:
+        []: []  # Authenticated via LiveKit signature
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event, room]
+              properties:
+                event:
+                  type: string
+                  enum: [room_started, participant_joined, participant_left, room_finished]
+                room:
+                  type: object
+                  required: [sid, name]
+                  properties:
+                    sid:
+                      type: string
+                      description: LiveKit room ID
+                    name:
+                      type: string
+                      description: Room name (group_id)
+                participant:
+                  type: object
+                  required: [sid, identity, state]
+                  properties:
+                    sid:
+                      type: string
+                      description: LiveKit participant SID
+                    identity:
+                      type: string
+                      description: Participant identity (pubkey)
+                    state:
+                      type: string
+                      description: Participant state (joined, connected, disconnected)
+                metadata:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '202':
+          description: Webhook accepted
+
+  /assets/{path}:
+    get:
+      summary: Get static asset
+      description: |
+        Serves static assets for the web client (JavaScript bundles, CSS, images).
+        Assets are cached with ETags for efficient revalidation.
+      operationId: getAsset
+      tags: [Assets]
+      security: []
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Asset path (e.g., "main.dart.js", "styles.css", "logo.png")
+      responses:
+        '200':
+          description: Asset content
+          content:
+            application/javascript:
+              schema:
+                type: string
+                format: binary
+            text/css:
+              schema:
+                type: string
+                format: binary
+            image/*:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Cache-Control:
+              description: Cache directive
+              schema:
+                type: string
+                example: "public, max-age=31536000, immutable"
+            ETag:
+              description: Asset version hash
+              schema:
+                type: string
+        '304':
+          description: Not modified (ETag match)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+        '404':
+          description: Asset not found
+
+  /assets/manifest.json:
+    get:
+      summary: Get asset manifest
+      description: |
+        Returns the build manifest containing asset mappings and integrity hashes.
+        Used by Service Worker for offline caching and cache busting.
+      operationId: getAssetManifest
+      tags: [Assets]
+      security: []
+      responses:
+        '200':
+          description: Asset manifest
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, assets]
+                properties:
+                  version:
+                    type: string
+                    description: Build version (git SHA or timestamp)
+                  assets:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      required: [url, hash]
+                      properties:
+                        url:
+                          type: string
+                        hash:
+                          type: string
+                          description: SHA-256 integrity hash
+
+components:
+  schemas:
+    NostrEvent:
+      type: object
+      required:
+        - id
+        - pubkey
+        - created_at
+        - kind
+        - tags
+        - content
+        - sig
+      properties:
+        id:
+          type: string
+        pubkey:
+          type: string
+        created_at:
+          type: integer
+        kind:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+        content:
+          type: string
+        sig:
+          type: string
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - INVALID_REQUEST
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+            - MLS_EPOCH_MISMATCH
+            - CLOCK_DESYNCHRONIZED
+            - INVALID_POW
+        details:
+          type: object
+          description: Additional error details
+
+  securitySchemes:
+    NIP98Auth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        NIP-98 HTTP Auth. Value should be "Nostr {base64_event}"
+        where base64_event is a Nostr event (kind 27235) signed by the user.

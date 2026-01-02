@@ -1,0 +1,309 @@
+# MLS State Machine for Synchrono City Calls
+
+**Version**: 1.0
+**Cipher Suite**: `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`
+
+## Overview
+
+This document defines the MLS (Message Layer Security, RFC 9420) state machine for group and DM calls in Synchrono City. The protocol uses a distributed leadership model where the first participant (Epoch Leader) manages MLS commits.
+
+---
+
+## State Diagram
+
+```
+                    ┌──────────────────┐
+                    │   Unjoined       │
+                    │  (Has KeyPackage)│
+                    └────────┬─────────┘
+                             │
+                             │ Join Group (Kind 20002)
+                             │ Receive Welcome
+                             ▼
+                    ┌──────────────────┐
+                    │   Joining        │
+                    │  (Processing     │
+                    │   Welcome)       │
+                    └────────┬─────────┘
+                             │
+                             │ State Initialized
+                             ▼
+                    ┌──────────────────┐
+                    │   Active         │◄────────────────────────────┐
+                    │  (Can Send/Recv  │                             │
+                    │   ApplicationMsg)│                             │
+                    └────────┬─────────┘                             │
+                             │                                       │
+                             │ Leave / Remove                        │
+                             ▼                                       │
+                    ┌──────────────────┐   Leader Transfer           │
+                    │   Departing      │◄────────────────────────────┘
+                    │  (Sending Commit  │
+                    │   to Remove Self) │
+                    └────────┬─────────┘
+                             │
+                             │ State Cleared
+                             ▼
+                    ┌──────────────────┐
+                    │   Inactive       │
+                    └──────────────────┘
+```
+
+---
+
+## Client States
+
+| State | Description | Valid Actions |
+|-------|-------------|---------------|
+| `UNJOINED` | Client has valid KeyPackages but is not in any MLS group | Publish KeyPackage (Kind 30022), Request to join (Kind 20002) |
+| `JOINING` | Client received Welcome, initializing local MLS state | Process Welcome, derive ratchet tree |
+| `ACTIVE` | Client is member of MLS group, can send/receive encrypted messages | Send application messages, process commits, add members (if leader), remove self |
+| `DEPARTING` | Client is leaving the group (sending remove commit) | Send commit with self removal, clear local state |
+| `INACTIVE` | Client is no longer in group | None (state can be discarded) |
+
+---
+
+## Epoch Leader Responsibilities
+
+The Epoch Leader is the first participant to join a call. Responsibilities:
+
+1. **Process Join Requests**: When new participants request to join via Kind 20002, leader fetches their KeyPackage and adds them to the group.
+
+2. **Issue Commits**: Leader sends MLS commit proposals to add new members:
+   ```
+   AddMember(KeyPackage) -> Proposal -> Commit -> Broadcast
+   ```
+
+3. **Distribute Welcomes**: Leader generates MLS Welcome messages for new participants and distributes via Sidecar.
+
+4. **Handle Departures**: When leader leaves cleanly, they issue a commit removing themselves. The Sidecar then assigns a new leader (longest-present participant).
+
+5. **Manage Epoch**: Leader increments epoch counter on each commit.
+
+---
+
+## Sidecar Responsibilities
+
+The Sidecar acts as MLS facilitator but does NOT possess private key material:
+
+1. **Maintain Membership Registry**: Track current participants via LiveKit webhooks.
+
+2. **Welcome Distribution**: When leader adds a member, Sidecar delivers the Welcome message:
+   - Via relay (Kind 20003 ephemeral)
+   - Or via direct HTTP response to join request
+
+3. **Leadership Transfer**: Detect when leader disconnects and assign new leader:
+   ```
+   On leader_disconnect:
+     Find longest_present_member
+     Notify all participants of new leader
+     Trigger MLS commit if needed
+   ```
+
+4. **State Recovery**: Provide current MLS state for clients recovering from epoch mismatch.
+
+---
+
+## Join Flow
+
+### 1. User Initiates Join (Client)
+
+```
+UserAction -> Create Kind 20002 (Join Request)
+  - Tags: ["h", group_id], ["e", call_id]
+  - 12-bit PoW required
+  - Publish to relay
+```
+
+### 2. Sidecar Receives Join Request
+
+```
+Sidecar -> Validate membership
+  - Check if user is in group (Kind 39001)
+  - Check if blocked by any current participant
+  - Check if room is full (max 50)
+  - Return error if any check fails
+```
+
+### 3. Epoch Leader Processes Join
+
+```
+Leader -> Fetch user's KeyPackage (Kind 30022)
+  -> Create MLS Add Proposal
+  -> Create MLS Commit
+  -> Generate Welcome for new member
+  -> Send Welcome to Sidecar for delivery
+  -> Broadcast Commit to relay
+```
+
+### 4. New Member Receives Welcome
+
+```
+Client -> Receive Welcome (via HTTP or relay)
+  -> Process Welcome with local KeyPackage
+  -> Derive group state
+  -> Connect to LiveKit with JWT
+  -> State = ACTIVE
+```
+
+---
+
+## Leadership Transfer
+
+### Clean Departure (Leader Initiates)
+
+```
+Leader -> Create Commit removing self
+  -> Broadcast to relay
+  -> Disconnect from LiveKit
+  -> Sidecar detects departure
+  -> Sidecar assigns new leader (longest present)
+  -> Sidecar notifies all participants via webhook
+```
+
+### Unexpected Disconnection
+
+```
+LiveKit -> Webhook: participant_left (was leader)
+  -> Sidecar checks membership registry
+  -> Finds longest_present_member
+  -> Assigns as new leader
+  -> Notifies all participants
+  -> New leader validates MLS tree (ghost device check)
+```
+
+---
+
+## Ghost Device Detection
+
+Clients MUST audit the MLS tree after each epoch change:
+
+```
+OnCommitReceived:
+  members = MLSGroup.members()
+  expected_members = relay.get_group_members(group_id)
+
+  unexpected = members - expected_members
+  if unexpected is not empty:
+    ALERT user: "Unauthorized key detected!"
+    Offer option: "Leave call for security"
+```
+
+**Ghost Device**: A public key in the MLS ratchet tree that is NOT in the relay's member list (Kind 39001).
+
+---
+
+## Frame Encryption Key Export
+
+LiveKit uses end-to-end frame encryption. Derive key from MLS:
+
+```
+label = "synchrono-city-frame-key"
+context = room_id
+length = 32 bytes
+
+frame_key = MLSGroup.ExportSecret(label, context, length)
+```
+
+Apply to LiveKit E2EE:
+- Audio/video frames encrypted with `frame_key`
+- Key rotated on each MLS epoch change
+- New participants derive key via MLS group secrets
+
+---
+
+## Error Recovery
+
+### MLS Epoch Mismatch
+
+When client's epoch doesn't match server state:
+
+```
+OnEpochMismatch:
+  state = Sidecar.GetMLSState(group_id)
+  if state.epoch > local_epoch:
+    // Server is ahead, fetch latest state
+    local_group = MLSGroup.FromBytes(state.group_state)
+  else if state.epoch < local_epoch:
+    // Local is ahead, may need to push pending commit
+    Sidecar.ProposeEpochState(group_id, local_state)
+  else:
+    // Epochs match but members differ - ghost device?
+    Alert("Possible security issue")
+```
+
+### Zombie Room
+
+Client connects to LiveKit but MLS Welcome never arrives (within 5 seconds):
+
+```
+OnConnectWithoutWelcome:
+  if (now - connect_time) > 5s AND welcome == null:
+    Leave LiveKit room
+    Display error: "Call initialization failed"
+    Option: "Retry join"
+```
+
+---
+
+## Data Structures
+
+### KeyPackage (Kind 30022)
+
+```json
+{
+  "id": "sha256_hash",
+  "pubkey": "owner_pubkey",
+  "content": "base64_mls_key_package",
+  "tags": [
+    ["expiration", "unix_timestamp"],
+    ["hpke_pubkey", "base64_hpke_key"]
+  ]
+}
+```
+
+### Welcome Message (Delivery via Sidecar)
+
+```json
+{
+  "welcome": "base64_mls_welcome",
+  "group_id": "livekit_room_id",
+  "epoch": 0,
+  "ratchet_tree": "base64_tree"
+}
+```
+
+### Commit Message (Broadcast to relay)
+
+```
+Kind: Encrypted MLS message (Kind 1069 for encrypted content)
+Content: MLS Commit (binary)
+Tags: [["h", group_id], ["epoch", current_epoch]]
+```
+
+---
+
+## Security Considerations
+
+1. **Welcome Message Privacy**: Must be encrypted for recipient (use their HPKE key from KeyPackage)
+
+2. **Commit Validation**: All participants must validate commit signatures and epoch increments
+
+3. **KeyPackage Rotation**: Auto-refresh before 7-day expiration; maintain 3-5 active packages
+
+4. **Sidecar Isolation**: Sidecar MUST NOT store MLS private keys; only facilitates distribution
+
+5. **LiveKit Token Binding**: JWT tokens bound to pubkey; single-use; 180s TTL
+
+---
+
+## Testing Checklist
+
+- [ ] Leader can add member via MLS commit
+- [ ] New member receives Welcome and joins successfully
+- [ ] Leadership transfers correctly on leader departure
+- [ ] Ghost device detection alerts on unauthorized keys
+- [ ] Frame key derivation produces consistent results
+- [ ] Epoch mismatch recovery works
+- [ ] Zombie room timeout triggers correctly
+- [ ] Sidecar cannot access private key material

@@ -1,0 +1,237 @@
+openapi: 3.0.3
+info:
+  title: Synchrono City Relay API
+  description: |
+    Nostr Relay API for Synchrono City with NIP-29 extensions.
+    This is a WebSocket-based relay using the Nostr protocol.
+  version: 1.0.0
+
+servers:
+  - url: wss://relay.synchrono.city
+    description: Production relay
+
+x-nostr:
+  nip11:
+    name: "Synchrono City Relay"
+    description: "Location-based social platform relay"
+    pubkey: "relay_public_key_here"
+    contact: "operator@example.com"
+    supported_nips: [1, 9, 11, 13, 15, 17, 20, 29, 44, 51, 59, 78, 98]
+    software: "khatru-go"
+    version: "1.0.0"
+    limitation:
+      max_message_length: 10000
+      max_subscription_filters: 10
+      min_pow_difficulty: 0
+      auth_required: false
+    relay_countries: ["US"]
+    language_tags: ["en"]
+    tags: ["social", "location-based"]
+    posting_policy: "https://relay.synchrono.city/policy"
+  synchrono_city:
+    groups_enabled: true
+    calls_enabled: true
+    max_group_size: 500
+    max_call_participants: 50
+    supported_kinds:
+      create_group: 9007
+      delete_group: 9008
+      group_metadata: [39000, 39002]
+      group_admin: [9021, 9022, 9023, 9024]
+      call_initiation: 1020
+      call_end: 1021
+      call_join: 20002
+
+paths:
+  /:
+    get:
+      summary: Nostr WebSocket Relay
+      description: |
+        Main WebSocket endpoint for Nostr protocol communication.
+        Client sends EVENT, REQ, CLOSE messages.
+        Relay sends EVENT, EOSE, OK, NOTICE, CLOSED messages.
+      operationId: websocket
+      tags: [WebSocket]
+      extensions:
+        x-nostr-opcodes:
+          CLIENT:
+            EVENT: "Publish an event"
+            REQ: "Subscribe to events"
+            CLOSE: "Close a subscription"
+          SERVER:
+            EVENT: "Event matching subscription"
+            EOSE: "End of Stored Events"
+            OK: "Event acceptance result"
+            NOTICE: "Informational message"
+            CLOSED: "Subscription closed"
+
+components:
+  schemas:
+    NostrEvent:
+      type: object
+      required:
+        - id
+        - pubkey
+        - created_at
+        - kind
+        - tags
+        - content
+        - sig
+      properties:
+        id:
+          type: string
+          description: SHA-256 hash of serialized event
+          example: "3dfa1..."
+        pubkey:
+          type: string
+          description: Public key of event creator
+          example: "79be2..."
+        created_at:
+          type: integer
+          description: Unix timestamp
+          example: 1704067200
+        kind:
+          type: integer
+          description: Event kind
+          example: 1
+        tags:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+          description: Tag array (e.g., [["e", "id"], ["p", "pubkey"]])
+          example: [["e", "3dfa1..."], ["p", "79be2..."]]
+        content:
+          type: string
+          description: Event content
+          example: "Hello, world!"
+        sig:
+          type: string
+          description: Schnorr signature
+          example: "abc123..."
+
+    GroupMetadataEvent:
+      allOf:
+        - $ref: '#/components/schemas/NostrEvent'
+        - type: object
+          properties:
+            kind:
+              type: integer
+              enum: [39000]
+              description: Group basic metadata
+            tags:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+              example: [["d", "group-id"], ["name", "Central Park Chats"], ["description", "NYC meetups"], ["image", "https://..."], ["geohash", "dr5reg"], ["lat", "40.78"], ["long", "-73.97"]]
+
+    CreateGroupEvent:
+      allOf:
+        - $ref: '#/components/schemas/NostrEvent'
+        - type: object
+          properties:
+            kind:
+              type: integer
+              enum: [9007]
+              description: Create new group
+            tags:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+              example: [["d", "central-park-chats"], ["name", "Central Park Chats"], ["description", "NYC meetups"], ["geohash", "dr5reg"], ["lat", "40.78"], ["long", "-73.97"], ["privacy", "public"]]
+            content:
+              type: string
+              description: Empty content for create event
+
+    CallInitiationEvent:
+      allOf:
+        - $ref: '#/components/schemas/NostrEvent'
+        - type: object
+          properties:
+            kind:
+              type: integer
+              enum: [1020]
+              description: Initiate group call
+            tags:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+              example: [["h", "group-id"], ["name", "Group Call"], ["video", "true"]]
+            content:
+              type: string
+              description: Call description or empty
+
+    CallJoinRequest:
+      allOf:
+        - $ref: '#/components/schemas/NostrEvent'
+        - type: object
+          properties:
+            kind:
+              type: integer
+              enum: [20002]
+              description: Request to join call
+            tags:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+              example: [["h", "group-id"], ["e", "call-id"]]
+
+    Filter:
+      type: object
+      description: Nostr subscription filter
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+          description: Event IDs
+        authors:
+          type: array
+          items:
+            type: string
+          description: Pubkeys
+        kinds:
+          type: array
+          items:
+            type: integer
+          description: Event kinds
+        e:
+          type: array
+          items:
+            type: string
+          description: Event references (reply parent)
+        p:
+          type: array
+          items:
+            type: string
+          description: Pubkey references (mentions)
+        since:
+          type: integer
+          description: Timestamp lower bound
+        until:
+          type: integer
+          description: Timestamp upper bound
+        limit:
+          type: integer
+          description: Max results
+        h:
+          type: array
+          items:
+            type: string
+          description: Group identifiers (NIP-29)
+
+  securitySchemes:
+    nip98:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: NIP-98 HTTP Auth (Nostr event signed by user)
