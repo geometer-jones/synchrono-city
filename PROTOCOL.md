@@ -98,12 +98,63 @@ The interoperable geospatial surface is geohash-tagged note flow plus relay-loca
 
 Synchrono City treats live place participation as relay-local call state rather than as a separate portable Nostr presence artifact.
 
+### 4.3 Private Room Binding (DMs and Group DMs)
+
+Private conversations support LiveKit calling with participant-scoped room access.
+
+**DM room binding:**
+- Room ID: `dm:<pubkey1>:<pubkey2>` where pubkeys are sorted lexicographically
+- Only the two participants may join
+- Either participant may initiate a call at any time
+
+**Group DM room binding:**
+- Room ID: `group:<creator-pubkey>:<group-id>` where group-id is a unique identifier
+- Membership is defined by the group DM participant list (NIP-17 sealed DM group)
+- Only group members may join the room
+
+**Call notification:**
+- DM call initiation should notify the other participant via NIP-17 sealed DM (kind 14/15) containing a call offer
+- The call offer includes the room ID and a timestamp
+- Group DM calls are discovered via the thread listing ("active call" indicator), not via push notification
+
+**Token vending for private rooms:**
+- Concierge must verify the requester is a participant before minting a token
+- For DMs: requester pubkey must match one of the two participants in the room ID
+- For group DMs: requester pubkey must be in the group membership list
+
+**Token vending error responses:**
+
+| Scenario | Response | Reason |
+|----------|----------|--------|
+| Non-participant requests DM token | 403 Forbidden | `not_participant` |
+| Non-member requests group DM token | 403 Forbidden | `not_group_member` |
+| Participant is banned | 403 Forbidden | `banned` |
+| Group membership lookup fails | 503 Unavailable | Fail closed |
+| Invalid room ID format | 400 Bad Request | `invalid_room_id` |
+
+**Security: Room ID validation**
+- Concierge must validate room ID format before checking membership
+- For DM rooms: extract pubkeys from room ID, verify requester matches one
+- For group DM rooms: resolve group-id to membership list, verify requester is member
+- **Never trust client-provided membership claims** — always resolve from stored group state
+- Room ID tampering attempts should be logged with requester pubkey
+
+**Call notification failure handling:**
+- If NIP-17 encryption fails, log error and return 500 (caller should retry)
+- If recipient is offline, the call offer is stored as a sealed DM and delivered when they connect
+- Call offers expire after 5 minutes if not answered
+- Client should show "call missed" notification for expired offers
+
+### 4.4 Live Place State
+
+Synchrono City treats live place participation as relay-local call state rather than as a separate portable Nostr presence artifact.
+
 - Concierge and LiveKit are the authority for who is currently present in a geohash-scoped call
 - kind `30311` remains the portable Nostr hint that a live geohash-scoped session exists
 - Clients should not require a separate Nostr presence event to render live place state
 - Clients should derive current place occupancy from active room membership and relay-scoped room discovery
 
-### 4.3 Relay Public Rooms
+### 4.5 Relay Public Rooms
 
 Relay operators may organize local public conversation around places, venues, neighborhoods, or temporary events without relying on relay-enforced group semantics.
 

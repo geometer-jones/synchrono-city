@@ -9,18 +9,20 @@ type PlaceTile = {
 
 type MapPreviewProps = {
   tiles: PlaceTile[];
+  onSelectTile?: (geohash: string) => void;
 };
 
 const hasMapboxConfig = Boolean(
   import.meta.env.VITE_MAPBOX_ACCESS_TOKEN && import.meta.env.VITE_MAPBOX_STYLE_URL
 );
+const shouldLoadMapbox = hasMapboxConfig && import.meta.env.MODE !== "test";
 
-export function MapPreview({ tiles }: MapPreviewProps) {
+export function MapPreview({ tiles, onSelectTile }: MapPreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!hasMapboxConfig || !containerRef.current) {
+    if (!shouldLoadMapbox || !containerRef.current) {
       return;
     }
 
@@ -85,6 +87,7 @@ export function MapPreview({ tiles }: MapPreviewProps) {
             className={`tile-marker marker-${index + 1}`}
             type="button"
             aria-label={`${tile.geohash} has ${tile.noteCount} notes and ${tile.participants.length} live participants`}
+            onClick={() => onSelectTile?.(tile.geohash)}
           >
             {tile.noteCount}
           </button>

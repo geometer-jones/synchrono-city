@@ -48,11 +48,11 @@ Related docs:
 **Duration:** 6-8 weeks
 
 **Deliverables:**
-- [ ] Geohash-scoped call intent and room resolution
-- [ ] Places (application-defined)
-- [ ] Notes at places
-- [ ] Profiles inside Pulse
-- [ ] Chats
+- [x] Geohash-scoped call intent and room resolution
+- [x] Places (application-defined)
+- [x] Notes at places
+- [x] Profiles inside Pulse
+- [x] Chats
 
 ### Phase 3: Relay Governance
 

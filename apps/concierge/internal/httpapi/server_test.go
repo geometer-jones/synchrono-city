@@ -34,6 +34,105 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestSocialBootstrapReturnsPhaseTwoData(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		RelayOperatorPubkey string `json:"relay_operator_pubkey"`
+		Places              []struct {
+			Geohash string `json:"geohash"`
+		} `json:"places"`
+		Profiles []struct {
+			Pubkey string `json:"pubkey"`
+		} `json:"profiles"`
+		Notes []struct {
+			ID string `json:"id"`
+		} `json:"notes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.RelayOperatorPubkey != "npub1operator" {
+		t.Fatalf("expected operator pubkey, got %s", response.RelayOperatorPubkey)
+	}
+	if len(response.Places) == 0 || len(response.Profiles) == 0 || len(response.Notes) == 0 {
+		t.Fatalf("expected seeded bootstrap data, got %+v", response)
+	}
+}
+
+func TestSocialNoteCreateAppendsNewNote(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	payload := []byte(`{"geohash":"9q8yyk","author_pubkey":"npub1scout","content":"Meet at the fountain in five."}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/notes", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rec.Code)
+	}
+
+	bootstrapReq := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
+	bootstrapRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bootstrapRec, bootstrapReq)
+
+	var bootstrap struct {
+		Notes []struct {
+			Content string `json:"content"`
+		} `json:"notes"`
+	}
+	if err := json.Unmarshal(bootstrapRec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap: %v", err)
+	}
+	if bootstrap.Notes[0].Content != "Meet at the fountain in five." {
+		t.Fatalf("expected newest note first, got %+v", bootstrap.Notes[0])
+	}
+}
+
+func TestSocialCallIntentResolvesRoomID(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	payload := []byte(`{"geohash":"9q8yyk","pubkey":"npub1scout"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/call-intent", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		RoomID             string   `json:"room_id"`
+		ParticipantPubkeys []string `json:"participant_pubkeys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.RoomID != "geo:npub1operator:9q8yyk" {
+		t.Fatalf("expected room id, got %s", response.RoomID)
+	}
+	if len(response.ParticipantPubkeys) == 0 || response.ParticipantPubkeys[0] != "npub1scout" {
+		t.Fatalf("expected current user in participant list, got %+v", response.ParticipantPubkeys)
+	}
+}
+
 func TestTokenRequiresNIP98Header(t *testing.T) {
 	srv := NewServer(config.Config{}, store.NewMemory())
 

@@ -20,7 +20,36 @@ Related docs:
 
 ## 1. Client Layer
 
-### 1.1 World: Geospatial Mesh
+### 1.1 Splash: Landing Page
+
+The splash page is the entry point for new visitors, presenting the project's mission and two primary calls to action.
+
+**Route:** `/` (root)
+
+**Content:**
+- Eyebrow label: "Synchrono City"
+- Tagline: "Chosen Presence. Sovereign Infrastructure. Portable Community."
+- Manifesto: full text from MANIFESTO.md including mission, vision, and all 12 principles
+- Featured quote: "Space is a primary index for collective life; the map brings that index online with more freedom."
+- Scrollable container for manifesto (max 60vh)
+
+**Calls to Action:**
+
+| CTA | Action | Target |
+|-----|--------|--------|
+| Enter the City | Navigate to World tab | `/app` |
+| Host Your Own | Open GitHub repo | `https://github.com/geometer-jones/synchrono-city` (new tab) |
+
+**Footer:** Brief tech stack mention — "Map-native coordination • Nostr identity • LiveKit media • Blossom storage"
+
+**Design considerations:**
+- Full-viewport centered layout
+- Gradient text treatment on tagline
+- Primary CTA uses brand gradient (orange/coral)
+- Secondary CTA is outlined, opens GitHub in new tab
+- Mobile: CTAs stack vertically
+
+### 1.2 World: Geospatial Mesh
 
 The first-version client renders geospatial activity from geohash-scoped LiveKit calls plus geohash-tagged kind `1` notes.
 
@@ -105,7 +134,155 @@ Relay operators may organize local public conversation around places, venues, ne
 - Tapping a marker should open `Chats` scoped to the exact geohash as a stack of kind `1` notes
 - Selecting a note from that chat stack should open the note in `Pulse`
 
-### 1.2 Settings: Relay Admin
+#### Route Interoperability
+
+```
+                    CLIENT ROUTE INTEROP
+                    ====================
+
+  WORLD                         CHATS                        PULSE
+    │                             │                            │
+    │  ┌─────────────────────┐    │                            │
+    │  │  Geohash Marker     │    │                            │
+    │  │  ┌───────────────┐  │    │                            │
+    │  │  │  Circle + #   │  │    │                            │
+    │  │  │  ┌─────────┐  │  │    │                            │
+    │  │  │  │Card     │  │──┼───▶│ Geo-chat (kind 1 stack)    │
+    │  │  │  │- latest │  │  │    │  ordered by recency        │
+    │  │  │  │  note   │  │  │    │                            │
+    │  │  │  │- roster │  │  │    │  ┌─────────────────────┐   │
+    │  │  │  │- join   │  │  │    │  │ Note from geo-chat  │───┼──▶ Note detail
+    │  │  │  └─────────┘  │  │    │  └─────────────────────┘   │  context
+    │  │  └───────────────┘  │    │                            │
+    │  └─────────────────────┘    │                            │
+    │                             │                            │
+    │                             │  ┌─────────────────────┐   │
+    │                             │  │ DM Thread           │   │
+    │                             │  │ - kind 4/14 msgs    │   │
+    │                             │  │ - [call] button     │───┼──▶ DM note view
+    │                             │  │ - [view profile]    │   │    (if public)
+    │                             │  └─────────────────────┘   │
+    │                             │                            │
+    │                             │  ┌─────────────────────┐   │
+    │                             │  │ Group DM Thread     │   │
+    │                             │  │ - sealed DMs        │   │
+    │                             │  │ - [call] button     │   │
+    │                             │  │ - member list       │   │
+    │                             │  └─────────────────────┘   │
+    │                             │                            │
+```
+
+**Navigation rules:**
+- Tapping a geo-chat note opens the note in Pulse for full context and threaded replies
+- Tapping a DM message opens the sender's profile in Pulse (if public profile exists)
+- Group DMs are private — no Pulse integration for private messages
+- All thread types support calling via the global call overlay
+
+### 1.3 Chats: Thread Listing
+
+The `Chats` view aggregates all conversation threads accessible to the user.
+
+**Thread types:**
+
+| Type | Identifier | LiveKit | Persistence |
+|------|------------|---------|-------------|
+| Geo-chat | Geohash (e.g., `9q8yyk`) | Yes (public room) | While at place, or after contributing a note |
+| DM | Participant pubkey(s) | Yes (private room) | Until explicitly deleted |
+| Group DM | Set of pubkeys | Yes (private room) | Until explicitly deleted |
+
+**Thread listing order:**
+- Threads with unread messages appear first
+- Then sorted by most recent activity
+- Geo-chats where user is currently present are highlighted
+
+**Geo-chat persistence rules:**
+- A geo-chat appears in the thread listing while the user is present at that geohash (in the call or viewing the place)
+- When the user leaves the geohash (moves presence away), the geo-chat is removed from the listing **unless** the user has contributed a kind `1` note to that geo-thread
+- Contributed notes create a durable relationship with the place
+- User may manually pin a geo-chat to persist regardless of contribution
+
+**Geo-chat persistence state machine:**
+
+```
+                    GEO-CHAT THREAD PERSISTENCE
+                    ===========================
+
+                              ┌─────────────────────┐
+                              │                     │
+                              ▼                     │
+                        ┌───────────┐               │
+                        │  NOT_IN_  │               │
+                        │  LISTING  │               │
+                        └───────────┘               │
+                              │                     │
+                   user joins│place (call/view)     │
+                              ▼                     │
+                        ┌───────────┐               │
+              ┌────────▶│  IN_      │◀────────┐     │
+              │         │  LISTING  │         │     │
+              │         └───────────┘         │     │
+              │              │                │     │
+              │   user leaves│place           │     │
+              │              ▼                │     │
+              │         ┌───────────┐         │     │
+              │         │  HAS_     │         │     │
+              │         │  CONTRIBUTED?       │     │
+              │         └───────────┘         │     │
+              │           │     │             │     │
+              │      yes  │     │ no          │     │
+              │           ▼     ▼             │     │
+              │     ┌────────┐ ┌────────┐     │     │
+              │     │ PINNED │ │ REMOVE │─────┼─────┘
+              │     │ (stay) │ │ (gone) │     │
+              │     └────────┘ └────────┘     │
+              │           │                   │
+              │   user rejoins│place          │
+              └───────────────┘               │
+                                              │
+          User may manually pin at any time ──┘
+          to persist regardless of contribution
+```
+
+**Pinned notes in geo-chat:**
+- Relay operators may pin one or more kind `1` notes to the top of a geo-chat
+- Pinned notes appear above the chronological stack with a pin indicator
+- Only operators and moderators can pin/unpin
+- Pinning is local relay policy, not a Nostr event kind
+
+### 1.4 Private Calling (DMs and Group DMs)
+
+DMs and group DMs support LiveKit calling with distinct permission semantics from public geo-chats.
+
+**Room resolution:**
+
+| Thread Type | Room ID Pattern | Who Can Join |
+|-------------|-----------------|--------------|
+| DM (2-person) | `dm:<pubkey1>:<pubkey2>` (sorted) | Only the two participants |
+| Group DM | `group:<creator>:<id>` | Participants in the group membership list |
+
+**Permission model:**
+
+| Capability | DM | Group DM | Geo-chat |
+|------------|----|-----------|----------|
+| Join call | Either participant | Any group member | Anyone with relay access (subject to guest list) |
+| Publish audio/video | Either participant | Any group member | Subject to room publish policy |
+| Invite others | No (add = new group) | Creator or designated admins | N/A (public) |
+| Kick from call | No | Creator or admins | Moderators only |
+
+**DM call initiation:**
+1. User A taps "Call" in DM thread
+2. Concierge creates room if not exists, mints token for user A
+3. User B receives call notification via NIP-04 DM (kind 4) or kind 30311 live activity
+4. User B accepts → Concierge mints token for user B
+5. Both connect to same LiveKit room
+
+**Group DM call initiation:**
+1. Any group member may start a call
+2. Other group members see "Active call" indicator in thread listing
+3. Members may join/leave freely while call is active
+4. Call ends when last participant leaves
+
+### 1.5 Settings: Relay Admin
 
 A compliant relay should expose operator controls through its web client or another authenticated admin surface.
 
@@ -124,7 +301,7 @@ A compliant relay should expose operator controls through its web client or anot
 - Allow room-level permission assignment
 - Show an audit trail for privileged changes
 
-### 1.3 Pulse
+### 1.6 Pulse
 
 `Pulse` is the relay feed projection over public events, authors, and follow context carried by one or more relays.
 

@@ -2,14 +2,47 @@
 
 Synchrono City is a hostable, map-native social stack for communities that coordinate through place. It combines Nostr identity and event transport, LiveKit media, Blossom storage, and relay-local policy enforced by Concierge.
 
+## Quick Start for Operators
+
+**One-command setup:**
+
+```bash
+git clone https://github.com/geometer-jones/synchrono-city
+cd synchrono-city
+./setup.sh
+```
+
+The setup script will:
+- Generate all required secrets
+- Create your operator Nostr keypair
+- Create `.env.docker` with everything configured
+- Offer to start the stack
+
+**After setup, your services:**
+- Client: http://localhost:5173
+- Relay: ws://localhost:8080
+- Admin: http://localhost:5173/app/settings
+
+### Manual Docker Setup
+
+If you prefer to configure manually:
+
+```bash
+cp .env.docker.example .env.docker
+# Edit .env.docker with your operator pubkey and secrets
+docker compose up --build
+```
+
+---
+
 ## Implementation Status
 
-The repository now includes a Phase 1 foundation scaffold:
+The repository now includes the Phase 1 foundation plus the Phase 2 social layer:
 
-- `apps/web`: React + Vite client shell with `World`, `Chats`, `Pulse`, and `Settings`
-- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging, LiveKit token vending, and a `strfry` policy shim
+- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, and a global geohash-scoped call overlay
+- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging, LiveKit token vending, a `strfry` policy shim, and public social bootstrap/note/call-intent endpoints for the web app
 - `db/migrations`: initial Postgres schema for policy, standing, sessions, and audit
-- `runbooks`: initial operator runbooks from the roadmap
+- `runbooks`: operator runbooks from the roadmap
 - `apps/concierge/relay-strfry.conf.example`: sample `strfry` write-policy plugin wiring for the relay shim
 
 ### Quick Start

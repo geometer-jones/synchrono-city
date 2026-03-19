@@ -181,6 +181,10 @@ The Concierge is a single point of failure for relay publish authorization. This
 - Relay connection count
 - Active sessions
 - Error rates by endpoint
+- **Token vending rate by room type** (geo-chat, DM, group DM)
+- **Active private calls** (DM + group DM call count)
+- **Call notification delivery latency**
+- **Room ID validation failures** (security signal)
 
 ### 3.2 Logging
 - All API requests (user pubkey, not IP)
@@ -374,6 +378,14 @@ When circuit is OPEN:
 | Geohash boundary | Unit | Coordinates at geohash boundary -> correct prefix |
 | Map dense area | Load | 10,000 markers -> clustering activates |
 | Session expiry mid-action | E2E | Session expires during form fill -> graceful re-auth |
+| **DM token non-participant** | Integration | Non-DM-participant requests token -> 403 |
+| **DM room ID tampering** | Integration | Requester modifies room ID -> 403, logged |
+| **Group DM non-member token** | Integration | Non-group-member requests token -> 403 |
+| **Geo-chat persistence leave** | Integration | User leaves place without contributing -> removed from listing |
+| **Geo-chat persistence contribute** | Integration | User leaves place after contributing -> stays in listing |
+| **Pinned note display** | Integration | Operator pins note -> appears at top of geo-chat |
+| **Call notification delivery** | Integration | DM call initiated -> sealed DM notification sent |
+| **Call notification offline** | Integration | Recipient offline -> notification stored for delivery |
 
 ### 5.3 Chaos Tests
 

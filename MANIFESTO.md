@@ -40,7 +40,7 @@ Place is not decorative metadata attached to a social graph. It is one of the ma
 
 Neighborhoods, venues, districts, routes, corners, and events structure trust and repeated encounter. If software cannot represent place well, it cannot help communities converge well.
 
-The map is not a gimmick. It is an index for collective life.
+Space is a primary index for collective life; the map brings that index online with more freedom.
 
 ### 3. Presence should be chosen, not extracted
 

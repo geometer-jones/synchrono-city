@@ -15,6 +15,7 @@ import (
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/nip98"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/policy"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/relayauth"
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/social"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
@@ -28,6 +29,7 @@ type Server struct {
 	tokenService  *scLiveKit.TokenService
 	policyService *policy.Service
 	relayAuth     *relayauth.Evaluator
+	socialService *social.Service
 	adminLimiter  *rateLimiter
 }
 
@@ -40,6 +42,7 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 		tokenService:  scLiveKit.NewTokenService(cfg, policyStore),
 		policyService: policy.NewService(policyStore, cfg.PrimaryOperatorPub),
 		relayAuth:     relayauth.NewEvaluator(policy.NewService(policyStore, cfg.PrimaryOperatorPub)),
+		socialService: social.NewService(cfg.PrimaryOperatorPub),
 		adminLimiter:  newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
 	}
 
@@ -54,6 +57,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/token", s.handleToken)
+	s.mux.HandleFunc("/api/v1/social/bootstrap", s.handleSocialBootstrap)
+	s.mux.HandleFunc("/api/v1/social/notes", s.handleSocialNotes)
+	s.mux.HandleFunc("/api/v1/social/call-intent", s.handleSocialCallIntent)
 	s.mux.HandleFunc("/api/v1/admin/policy/check", s.handleAdminPolicyCheck)
 	s.mux.HandleFunc("/api/v1/admin/policies", s.handleAdminPolicies)
 	s.mux.HandleFunc("/api/v1/admin/standing", s.handleAdminStanding)
@@ -61,6 +67,75 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/admin/audit", s.handleAdminAudit)
 	s.mux.HandleFunc("/api/v1/relay/authorize", s.handleRelayAuthorize)
 	s.mux.HandleFunc("/internal/relay/authorize", s.handleInternalRelayAuthorize)
+}
+
+func (s *Server) handleSocialBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, s.socialService.Bootstrap())
+}
+
+func (s *Server) handleSocialNotes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	var request struct {
+		Geohash      string `json:"geohash"`
+		AuthorPubkey string `json:"author_pubkey"`
+		Content      string `json:"content"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	note, err := s.socialService.CreateNote(strings.TrimSpace(request.Geohash), strings.TrimSpace(request.AuthorPubkey), request.Content)
+	if err != nil {
+		status := http.StatusBadRequest
+		switch {
+		case errors.Is(err, social.ErrUnknownPlace):
+			status = http.StatusNotFound
+		case errors.Is(err, social.ErrEmptyContent):
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, note)
+}
+
+func (s *Server) handleSocialCallIntent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	var request struct {
+		Geohash string `json:"geohash"`
+		Pubkey  string `json:"pubkey"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	intent, err := s.socialService.ResolveCallIntent(strings.TrimSpace(request.Geohash), strings.TrimSpace(request.Pubkey))
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, social.ErrUnknownPlace) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, intent)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

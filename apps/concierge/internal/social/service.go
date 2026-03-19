@@ -1,0 +1,370 @@
+package social
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+var ErrUnknownPlace = errors.New("unknown place")
+var ErrEmptyContent = errors.New("content is required")
+var ErrContentTooLong = errors.New("content exceeds maximum length")
+var ErrInvalidGeohash = errors.New("invalid geohash format")
+
+const MaxNoteContentLength = 1000
+const MinGeohashLength = 1
+
+const DefaultCurrentUserPubkey = "npub1scout"
+const fallbackOperatorPubkey = "npub1operator"
+
+type Profile struct {
+	Pubkey      string `json:"pubkey"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	Bio         string `json:"bio"`
+	HomeGeohash string `json:"home_geohash,omitempty"`
+	Mic         bool   `json:"mic"`
+	Cam         bool   `json:"cam"`
+	Screenshare bool   `json:"screenshare"`
+	Deafen      bool   `json:"deafen"`
+}
+
+type Place struct {
+	Geohash         string   `json:"geohash"`
+	Title           string   `json:"title"`
+	Neighborhood    string   `json:"neighborhood"`
+	Description     string   `json:"description"`
+	ActivitySummary string   `json:"activity_summary"`
+	Tags            []string `json:"tags"`
+	Capacity        int      `json:"capacity"`
+	OccupantPubkeys []string `json:"occupant_pubkeys"`
+	Unread          bool     `json:"unread"`
+	PinnedNoteID    string   `json:"pinned_note_id,omitempty"`
+}
+
+type Note struct {
+	ID           string `json:"id"`
+	Geohash      string `json:"geohash"`
+	AuthorPubkey string `json:"author_pubkey"`
+	Content      string `json:"content"`
+	CreatedAt    string `json:"created_at"`
+	Replies      int    `json:"replies"`
+}
+
+type FeedSegment struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type BootstrapResponse struct {
+	RelayOperatorPubkey string        `json:"relay_operator_pubkey"`
+	CurrentUserPubkey   string        `json:"current_user_pubkey"`
+	Places              []Place       `json:"places"`
+	Profiles            []Profile     `json:"profiles"`
+	Notes               []Note        `json:"notes"`
+	FeedSegments        []FeedSegment `json:"feed_segments"`
+}
+
+type CallIntent struct {
+	Geohash            string   `json:"geohash"`
+	RoomID             string   `json:"room_id"`
+	PlaceTitle         string   `json:"place_title"`
+	ParticipantPubkeys []string `json:"participant_pubkeys"`
+}
+
+type Service struct {
+	mu                sync.RWMutex
+	operatorPubkey    string
+	currentUserPubkey string
+	places            []Place
+	profiles          []Profile
+	notes             []Note
+	feedSegments      []FeedSegment
+	nextNoteID        int64
+	now               func() time.Time
+}
+
+func NewService(operatorPubkey string) *Service {
+	if strings.TrimSpace(operatorPubkey) == "" {
+		operatorPubkey = fallbackOperatorPubkey
+	}
+
+	// Seed data below is the authoritative source.
+	// Keep in sync with apps/web/src/data.ts fallback seed data.
+	return &Service{
+		operatorPubkey:    operatorPubkey,
+		currentUserPubkey: DefaultCurrentUserPubkey,
+		places: []Place{
+			{
+				Geohash:         "9q8yyk",
+				Title:           "Civic plaza",
+				Neighborhood:    "Market steps",
+				Description:     "A public square for turnout coordination, accessibility updates, and live town-hall spillover.",
+				ActivitySummary: "Tenant organizing thread with a pinned logistics note and a live room.",
+				Tags:            []string{"assembly", "accessibility", "civic"},
+				Capacity:        8,
+				OccupantPubkeys: []string{"npub1aurora", "npub1jules", "npub1sol"},
+				Unread:          true,
+				PinnedNoteID:    "note-plaza-pinned",
+			},
+			{
+				Geohash:         "9q8yym",
+				Title:           "Warehouse annex",
+				Neighborhood:    "Harbor side",
+				Description:     "An indoor fallback place for venue logistics, check-in flow, and overflow audio coordination.",
+				ActivitySummary: "The venue lead moved the afterparty indoors and is guiding arrivals.",
+				Tags:            []string{"venue", "logistics", "overflow"},
+				Capacity:        6,
+				OccupantPubkeys: []string{"npub1mika"},
+				Unread:          false,
+			},
+			{
+				Geohash:         "9q8yyt",
+				Title:           "Audio fallback",
+				Neighborhood:    "Transit corridor",
+				Description:     "A low-friction audio place that stays open even when note traffic drops to zero.",
+				ActivitySummary: "Late arrivals are using the room as a rendezvous channel.",
+				Tags:            []string{"audio", "late-night", "fallback"},
+				Capacity:        6,
+				OccupantPubkeys: []string{"npub1river", "npub1nox"},
+				Unread:          true,
+			},
+		},
+		profiles: []Profile{
+			{
+				Pubkey:      DefaultCurrentUserPubkey,
+				DisplayName: "Field Scout",
+				Role:        "Local member",
+				Status:      "Posting place notes and stepping into nearby rooms.",
+				Bio:         "Tracks live place state, adds operator-facing notes, and joins calls when coordination shifts.",
+				Mic:         true,
+				Cam:         false,
+				Screenshare: false,
+				Deafen:      false,
+			},
+			{
+				Pubkey:      "npub1aurora",
+				DisplayName: "Aurora Vale",
+				Role:        "Tenant organizer",
+				Status:      "Coordinating arrival updates from the east stairs.",
+				Bio:         "Runs block-level organizing threads and keeps the sunset meetups on schedule.",
+				HomeGeohash: "9q8yyk",
+				Mic:         true,
+				Cam:         false,
+				Screenshare: false,
+				Deafen:      false,
+			},
+			{
+				Pubkey:      "npub1jules",
+				DisplayName: "Jules Mercer",
+				Role:        "Neighborhood volunteer",
+				Status:      "Sharing supply counts and street-level accessibility notes.",
+				Bio:         "Tracks turnout and accessibility changes for public gatherings.",
+				HomeGeohash: "9q8yyk",
+				Mic:         true,
+				Cam:         true,
+				Screenshare: false,
+				Deafen:      false,
+			},
+			{
+				Pubkey:      "npub1sol",
+				DisplayName: "Sol Marin",
+				Role:        "Event host",
+				Status:      "Pinned on the plaza room and routing newcomers.",
+				Bio:         "Hosts pop-up conversations and keeps the plaza room active.",
+				HomeGeohash: "9q8yyk",
+				Mic:         false,
+				Cam:         true,
+				Screenshare: true,
+				Deafen:      false,
+			},
+			{
+				Pubkey:      "npub1mika",
+				DisplayName: "Mika Hart",
+				Role:        "Venue lead",
+				Status:      "Moving the afterparty indoors and updating room logistics.",
+				Bio:         "Coordinates venue operations when activity shifts between tiles.",
+				HomeGeohash: "9q8yym",
+				Mic:         true,
+				Cam:         false,
+				Screenshare: false,
+				Deafen:      true,
+			},
+			{
+				Pubkey:      "npub1river",
+				DisplayName: "River Stone",
+				Role:        "Audio host",
+				Status:      "Keeping the room open for late arrivals.",
+				Bio:         "Maintains lightweight audio rooms after the public note stack slows down.",
+				HomeGeohash: "9q8yyt",
+				Mic:         true,
+				Cam:         false,
+				Screenshare: false,
+				Deafen:      false,
+			},
+			{
+				Pubkey:      "npub1nox",
+				DisplayName: "Nox Reed",
+				Role:        "Field reporter",
+				Status:      "Watching for overflow from the next tile over.",
+				Bio:         "Posts quick context notes when gatherings spill into nearby blocks.",
+				HomeGeohash: "9q8yyt",
+				Mic:         false,
+				Cam:         false,
+				Screenshare: false,
+				Deafen:      false,
+			},
+		},
+		notes: []Note{
+			{
+				ID:           "note-plaza-pinned",
+				Geohash:      "9q8yyk",
+				AuthorPubkey: "npub1aurora",
+				Content:      "Sunset meetup is shifting to the east stairs.",
+				CreatedAt:    "2026-03-18T18:20:00Z",
+				Replies:      4,
+			},
+			{
+				ID:           "note-plaza-access",
+				Geohash:      "9q8yyk",
+				AuthorPubkey: "npub1jules",
+				Content:      "North gate is clear again. Wheelchair route is the left ramp.",
+				CreatedAt:    "2026-03-18T18:08:00Z",
+				Replies:      2,
+			},
+			{
+				ID:           "note-plaza-stream",
+				Geohash:      "9q8yyk",
+				AuthorPubkey: "npub1sol",
+				Content:      "Screenshare is live for anyone still walking over.",
+				CreatedAt:    "2026-03-18T17:58:00Z",
+				Replies:      1,
+			},
+			{
+				ID:           "note-annex-move",
+				Geohash:      "9q8yym",
+				AuthorPubkey: "npub1mika",
+				Content:      "Afterparty moved indoors. Audio room is live.",
+				CreatedAt:    "2026-03-18T18:15:00Z",
+				Replies:      3,
+			},
+			{
+				ID:           "note-annex-checkin",
+				Geohash:      "9q8yym",
+				AuthorPubkey: "npub1mika",
+				Content:      "Check in at the alley entrance. Capacity is stable for now.",
+				CreatedAt:    "2026-03-18T17:50:00Z",
+				Replies:      0,
+			},
+			{
+				ID:           "note-audio-rollcall",
+				Geohash:      "9q8yyt",
+				AuthorPubkey: "npub1river",
+				Content:      "No new notes, but the room is still occupied.",
+				CreatedAt:    "2026-03-18T18:05:00Z",
+				Replies:      1,
+			},
+		},
+		feedSegments: []FeedSegment{
+			{Name: "Following", Description: "Explainable projection of followed authors."},
+			{Name: "Local", Description: "Public events carried by the active relay."},
+			{Name: "For You", Description: "Concierge-produced merge across relays and follows."},
+		},
+		nextNoteID: 6,
+		now:        time.Now,
+	}
+}
+
+func (s *Service) Bootstrap() BootstrapResponse {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return BootstrapResponse{
+		RelayOperatorPubkey: s.operatorPubkey,
+		CurrentUserPubkey:   s.currentUserPubkey,
+		Places:              slices.Clone(s.places),
+		Profiles:            slices.Clone(s.profiles),
+		Notes:               slices.Clone(s.notes),
+		FeedSegments:        slices.Clone(s.feedSegments),
+	}
+}
+
+func (s *Service) CreateNote(geohash, authorPubkey, content string) (Note, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(content) == "" {
+		return Note{}, ErrEmptyContent
+	}
+	if len(content) > MaxNoteContentLength {
+		return Note{}, ErrContentTooLong
+	}
+	if len(strings.TrimSpace(geohash)) < MinGeohashLength {
+		return Note{}, ErrInvalidGeohash
+	}
+	if !s.hasPlaceLocked(geohash) {
+		return Note{}, ErrUnknownPlace
+	}
+	if strings.TrimSpace(authorPubkey) == "" {
+		authorPubkey = s.currentUserPubkey
+	}
+
+	s.nextNoteID++
+	note := Note{
+		ID:           fmt.Sprintf("note-%d", s.nextNoteID),
+		Geohash:      geohash,
+		AuthorPubkey: authorPubkey,
+		Content:      strings.TrimSpace(content),
+		CreatedAt:    s.now().UTC().Format(time.RFC3339),
+		Replies:      0,
+	}
+	s.notes = append([]Note{note}, s.notes...)
+	return note, nil
+}
+
+func (s *Service) ResolveCallIntent(geohash, pubkey string) (CallIntent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	place, ok := s.placeByGeohashLocked(geohash)
+	if !ok {
+		return CallIntent{}, ErrUnknownPlace
+	}
+	if strings.TrimSpace(pubkey) == "" {
+		pubkey = s.currentUserPubkey
+	}
+
+	participants := slices.Clone(place.OccupantPubkeys)
+	if !slices.Contains(participants, pubkey) {
+		participants = append([]string{pubkey}, participants...)
+	}
+
+	return CallIntent{
+		Geohash:            geohash,
+		RoomID:             ResolveRoomID(s.operatorPubkey, geohash),
+		PlaceTitle:         place.Title,
+		ParticipantPubkeys: participants,
+	}, nil
+}
+
+func ResolveRoomID(operatorPubkey, geohash string) string {
+	return fmt.Sprintf("geo:%s:%s", operatorPubkey, geohash)
+}
+
+func (s *Service) hasPlaceLocked(geohash string) bool {
+	_, ok := s.placeByGeohashLocked(geohash)
+	return ok
+}
+
+func (s *Service) placeByGeohashLocked(geohash string) (Place, bool) {
+	for _, place := range s.places {
+		if place.Geohash == geohash {
+			return place, true
+		}
+	}
+	return Place{}, false
+}
