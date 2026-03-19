@@ -46,6 +46,11 @@ The map surface aggregates by canonical geohash tile.
 - Each tile may expose a place card whose top-left corner is anchored at the center of the circle marker
 - The top of the card shows the text content of the latest kind `1` note for that exact geohash, when one exists
 - The card lists the current call participants for that tile beneath the latest-note preview
+- Each participant in the roster shows their media state indicators:
+  - **Mic:** on/off (muted)
+  - **Cam:** on/off
+  - **Screenshare:** active/inactive
+  - **Deafen:** on/off (user cannot hear others)
 - Profile inspection from the card should route through `Pulse` user profile views
 - If the tile has neither notes nor an active call, the client should render nothing
 
@@ -55,7 +60,31 @@ The map surface aggregates by canonical geohash tile.
 3. Resolve the active LiveKit room for that tile
 4. Resolve the latest kind `1` note for that exact geohash
 5. Render one circle marker per tile with the note count
-6. Render the place card with latest-note preview and, when present, the participant roster
+6. Render the place card with latest-note preview and, when present, the participant roster with media state indicators
+
+#### Global Call Overlay
+
+When a user joins a geohash-scoped call, a global call overlay provides persistent call controls regardless of navigation within the app.
+
+**Overlay behavior:**
+- The overlay is visible whenever the user has an active LiveKit connection
+- The overlay persists across client navigation (World, Chats, Pulse, Settings)
+- The overlay should be dismissible to a minimized state, but remains active until the user leaves the call
+- Leaving the call requires explicit action (not accidental navigation)
+
+**Call controls:**
+| Control | Function | States |
+|---------|----------|--------|
+| Mic | Toggle microphone | on / off (muted) |
+| Cam | Toggle camera | on / off |
+| Screenshare | Share screen | active / inactive |
+| Deafen | Mute all incoming audio | on / off |
+| Leave | Exit the call | — |
+
+**Overlay placement:**
+- Fixed position at bottom of viewport
+- Does not obstruct map interaction when in World view
+- Minimizable to a compact bar showing only active indicators
 
 #### Dense-Area Clustering
 
