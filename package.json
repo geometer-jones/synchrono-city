@@ -1,0 +1,11 @@
+{
+  "name": "synchrono-city",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "pnpm --filter web build",
+    "dev": "pnpm --filter web dev",
+    "test": "pnpm --filter web test",
+    "verify": "pnpm --filter web build && pnpm --filter web test && cd apps/concierge && go test ./..."
+  }
+}

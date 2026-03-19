@@ -1,0 +1,311 @@
+:root {
+  color-scheme: dark;
+  font-family: "IBM Plex Sans", "Avenir Next", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(255, 131, 92, 0.28), transparent 24%),
+    radial-gradient(circle at top right, rgba(104, 180, 255, 0.2), transparent 22%),
+    linear-gradient(180deg, #0d1720 0%, #091018 100%);
+  color: #f6f3ea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: transparent;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  width: min(1200px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  gap: 24px;
+  align-items: start;
+  margin-bottom: 24px;
+}
+
+.eyebrow,
+.section-label {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.78rem;
+  color: #f6a56f;
+  margin: 0 0 8px;
+}
+
+.hero h1,
+.panel h2,
+.map-card h2 {
+  margin: 0;
+  font-size: clamp(2.1rem, 4vw, 4.4rem);
+  line-height: 0.95;
+}
+
+.hero-copy,
+.muted {
+  color: rgba(246, 243, 234, 0.75);
+  max-width: 60ch;
+  line-height: 1.5;
+}
+
+.status-panel,
+.panel,
+.map-card {
+  background: rgba(10, 19, 27, 0.78);
+  border: 1px solid rgba(246, 243, 234, 0.12);
+  border-radius: 22px;
+  box-shadow: 0 28px 50px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(16px);
+}
+
+.status-panel,
+.panel {
+  padding: 20px;
+}
+
+.status-pill,
+.config-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: rgba(246, 165, 111, 0.12);
+  color: #ffd6b9;
+  font-size: 0.88rem;
+}
+
+.config-pill.ready {
+  background: rgba(103, 214, 158, 0.14);
+  color: #c7ffe5;
+}
+
+.metric-list {
+  margin: 18px 0 0;
+  display: grid;
+  gap: 12px;
+}
+
+.metric-list div {
+  display: grid;
+  gap: 4px;
+}
+
+.metric-list dt {
+  color: rgba(246, 243, 234, 0.65);
+  font-size: 0.88rem;
+}
+
+.metric-list dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.top-nav {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.nav-link {
+  text-decoration: none;
+  color: rgba(246, 243, 234, 0.74);
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(246, 243, 234, 0.06);
+  border: 1px solid transparent;
+}
+
+.nav-link.active {
+  color: #091018;
+  background: #f6f3ea;
+}
+
+.content {
+  display: block;
+}
+
+.route-grid {
+  display: grid;
+  gap: 20px;
+}
+
+.map-card {
+  padding: 20px;
+}
+
+.map-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+
+.map-surface {
+  position: relative;
+  overflow: hidden;
+  min-height: 380px;
+  border-radius: 18px;
+  border: 1px solid rgba(246, 243, 234, 0.08);
+  background:
+    linear-gradient(135deg, rgba(7, 13, 18, 0.95), rgba(13, 31, 39, 0.85)),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02));
+}
+
+.mapbox-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.map-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(circle at center, black 55%, transparent 100%);
+}
+
+.tile-marker {
+  position: absolute;
+  width: 62px;
+  height: 62px;
+  border: none;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #f6a56f 0%, #de5d3d 100%);
+  color: #091018;
+  font-size: 1.1rem;
+  font-weight: 700;
+  box-shadow: 0 18px 26px rgba(222, 93, 61, 0.28);
+}
+
+.marker-1 {
+  top: 18%;
+  left: 22%;
+}
+
+.marker-2 {
+  top: 42%;
+  left: 58%;
+}
+
+.marker-3 {
+  top: 61%;
+  left: 36%;
+}
+
+.map-overlay {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  background: rgba(9, 16, 24, 0.75);
+  border: 1px solid rgba(246, 243, 234, 0.08);
+  border-radius: 16px;
+  color: rgba(246, 243, 234, 0.78);
+}
+
+.scene-health {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.scene-health article,
+.tile-card {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(246, 243, 234, 0.04);
+  border: 1px solid rgba(246, 243, 234, 0.08);
+}
+
+.scene-health span {
+  font-size: 2rem;
+  font-weight: 700;
+  display: inline-block;
+  margin-bottom: 8px;
+}
+
+.scene-health p,
+.tile-card p {
+  margin: 0 0 8px;
+}
+
+.tile-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.tile-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.primary-button {
+  margin-top: 8px;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 18px;
+  background: #f6a56f;
+  color: #091018;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.story-export {
+  margin-top: 16px;
+  overflow-x: auto;
+  padding: 16px;
+  border-radius: 18px;
+  background: #071018;
+  border: 1px solid rgba(246, 243, 234, 0.08);
+  white-space: pre-wrap;
+}
+
+.capability-list {
+  margin: 18px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 10px;
+}
+
+@media (max-width: 860px) {
+  .hero,
+  .scene-health {
+    grid-template-columns: 1fr;
+  }
+
+  .map-card-header {
+    flex-direction: column;
+  }
+}

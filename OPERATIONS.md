@@ -28,6 +28,9 @@ LIVEKIT_API_KEY
 LIVEKIT_API_SECRET
 LIVEKIT_URL
 DATABASE_URL
+DB_MAX_OPEN_CONNS
+DB_MAX_IDLE_CONNS
+DB_CONN_MAX_LIFETIME
 PRIMARY_OPERATOR_PUBKEY
 RELAY_NAME
 RELAY_SLUG
@@ -38,6 +41,17 @@ SESSION_TTL
 SESSION_IDLE_TTL
 CSRF_SIGNING_SECRET
 ```
+
+`LIVEKIT_URL` should point at the LiveKit API/WebSocket endpoint that clients connect to, for example `ws://localhost:17880` for local development.
+
+`DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, and `DB_CONN_MAX_LIFETIME` control the Concierge Postgres pool. Defaults are `25`, `5`, and `30m`.
+
+### 1.2.1 Relay Shim Env
+```
+CONCIERGE_RELAY_AUTH_URL
+```
+
+Default: `http://127.0.0.1:3000/internal/relay/authorize`
 
 ### 1.3 Default Ports
 | Service | Port |
@@ -140,6 +154,18 @@ The Concierge is a single point of failure for relay publish authorization. This
 - Circuit breaker with automatic recovery
 - Health check endpoint for monitoring
 - Alert on Concierge unavailability
+- Operator runbooks for [relay down](runbooks/relay-down.md) and [Postgres down](runbooks/postgres-down.md)
+
+**Blast radius:**
+- New relay publishes are rejected while Concierge is unreachable
+- New LiveKit token requests fail because room authorization cannot complete
+- Admin writes and audit reads are unavailable until Concierge recovers
+
+**Minimum monitoring guidance:**
+- Probe `/healthz` from the same network path used by the relay shim
+- Alert if the relay shim reject rate spikes with `relay authorization unavailable`
+- Alert if Postgres connectivity errors appear in Concierge logs
+- After recovery, validate one publish and one token request before closing the incident
 
 **Deferred to Phase 3+:**
 - Active-passive Concierge failover

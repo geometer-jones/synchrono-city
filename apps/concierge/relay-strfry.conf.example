@@ -1,0 +1,11 @@
+db = "./strfry-db/"
+
+relay {
+  bind = "127.0.0.1"
+  port = 8080
+
+  writePolicy {
+    plugin = "CONCIERGE_RELAY_AUTH_URL=http://127.0.0.1:3000/internal/relay/authorize ./relay-shim"
+    timeoutSeconds = 10
+  }
+}

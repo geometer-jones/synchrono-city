@@ -25,13 +25,13 @@ Related docs:
 - [x] ARCHITECTURE.md
 - [x] OPERATIONS.md
 - [x] ROADMAP.md
-- [ ] Client shell with routing
-- [ ] strfry relay with policy shim
-- [ ] Concierge: auth, policy, relay authorization
-- [ ] Postgres schema with migrations
-- [ ] Basic World view with Mapbox
-- [ ] **Scene health dashboard** (delight feature)
-- [ ] **Export as story** (delight feature)
+- [x] Client shell with routing
+- [x] strfry relay with policy shim
+- [x] Concierge: auth, policy, relay authorization
+- [x] Postgres schema with migrations
+- [x] Basic World view with Mapbox
+- [x] **Scene health dashboard** (delight feature)
+- [x] **Export as story** (delight feature)
 
 **Technical Requirements:**
 - Circuit breaker for relay failures
@@ -40,8 +40,8 @@ Related docs:
 - Marker clustering for dense areas
 - Geohash-scoped LiveKit room resolution
 - Time-based + cursor pagination
-- Runbooks in repo
-- Shim unit + integration tests
+- [x] Runbooks in repo
+- [x] Shim unit + integration tests
 
 ### Phase 2: Social Layer
 
@@ -132,7 +132,7 @@ Deferred items from the CEO Plan Review (2026-03-18).
 - **Why:** Operators need guidance for common failure modes
 - **Effort:** S
 - **Priority:** P1
-- **Status:** To be written
+- **Status:** Written
 - **Items:**
   - Relay down
   - Postgres down

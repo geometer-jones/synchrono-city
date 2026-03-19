@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+.DS_Store
+.env
+.env.docker
+apps/web/.env.local
+apps/concierge/.env.local
+apps/concierge/concierge
+apps/web/vite.config.js
+apps/web/vite.config.d.ts

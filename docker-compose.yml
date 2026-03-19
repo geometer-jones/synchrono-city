@@ -1,0 +1,120 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-synchrono_city}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-synchrono_city}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    depends_on:
+      redis:
+        condition: service_started
+    ports:
+      - "17880:7880"
+      - "17881:7881"
+      - "50000-50010:50000-50010/udp"
+    volumes:
+      - ./deploy/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+
+  blossom:
+    image: ghcr.io/hzrd149/blossom-server:master
+    command: ["-c", "/config/config.yml"]
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./deploy/blossom/config.yml:/config/config.yml:ro
+      - blossom_data:/data
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/concierge/Dockerfile
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/synchrono_city?sslmode=disable}
+      MIGRATIONS_DIR: /app/db/migrations
+    entrypoint: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  concierge:
+    build:
+      context: .
+      dockerfile: apps/concierge/Dockerfile
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/synchrono_city?sslmode=disable}
+      PORT: 3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  relay:
+    build:
+      context: .
+      dockerfile: deploy/relay/Dockerfile
+    environment:
+      STRFRY_BIND: 0.0.0.0
+      STRFRY_PORT: 8080
+      STRFRY_DB: /var/lib/strfry
+      CONCIERGE_RELAY_AUTH_URL: ${CONCIERGE_RELAY_AUTH_URL:-http://concierge:3000/internal/relay/authorize}
+    depends_on:
+      concierge:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - relay_data:/var/lib/strfry
+
+  client:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_CONCIERGE_URL: ${VITE_CONCIERGE_URL:-http://localhost:3000}
+        VITE_NOSTR_RELAY_URL: ${VITE_NOSTR_RELAY_URL:-ws://localhost:8080}
+        VITE_BLOSSOM_URL: ${VITE_BLOSSOM_URL:-http://localhost:3001}
+        VITE_MAPBOX_ACCESS_TOKEN: ${VITE_MAPBOX_ACCESS_TOKEN:-}
+        VITE_MAPBOX_STYLE_URL: ${VITE_MAPBOX_STYLE_URL:-mapbox://styles/mapbox/dark-v11}
+    depends_on:
+      concierge:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres_data:
+  redis_data:
+  blossom_data:
+  relay_data:
