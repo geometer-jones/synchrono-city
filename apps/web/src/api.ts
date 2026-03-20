@@ -12,8 +12,12 @@ export class ApiError extends Error {
 
 const conciergeBaseUrl = import.meta.env.VITE_CONCIERGE_URL ?? "";
 
+export function resolveApiURL(path: string): URL {
+  return new URL(path, conciergeBaseUrl || window.location.origin);
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(new URL(path, conciergeBaseUrl || window.location.origin), {
+  const response = await fetch(resolveApiURL(path), {
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {})

@@ -103,12 +103,36 @@ func TestPostgresStoreIntegration(t *testing.T) {
 		t.Fatalf("unexpected room permission: %+v", permission)
 	}
 
-	entries, err := store.ListAuditEntries(ctx, 10)
+	listedPolicies, err := store.ListPolicyAssignments(ctx, PolicyAssignmentQuery{PolicyType: "block", Limit: 10})
+	if err != nil {
+		t.Fatalf("list policy assignments: %v", err)
+	}
+	if len(listedPolicies) != 1 || listedPolicies[0].PolicyType != "block" {
+		t.Fatalf("unexpected listed policies: %+v", listedPolicies)
+	}
+
+	listedStanding, err := store.ListStandingRecords(ctx, StandingRecordQuery{SubjectPubkey: "npub1member", Limit: 10})
+	if err != nil {
+		t.Fatalf("list standing records: %v", err)
+	}
+	if len(listedStanding) != 1 || listedStanding[0].Standing != "member" {
+		t.Fatalf("unexpected listed standing: %+v", listedStanding)
+	}
+
+	listedPermissions, err := store.ListRoomPermissions(ctx, RoomPermissionQuery{RoomID: "geo:npub1operator:9q8yyk", Limit: 10})
+	if err != nil {
+		t.Fatalf("list room permissions: %v", err)
+	}
+	if len(listedPermissions) != 1 || listedPermissions[0].RoomID != "geo:npub1operator:9q8yyk" {
+		t.Fatalf("unexpected listed permissions: %+v", listedPermissions)
+	}
+
+	page, err := store.ListAuditEntries(ctx, AuditEntryQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("list audit entries: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Scope != DefaultScopeValue {
-		t.Fatalf("unexpected audit entries: %+v", entries)
+	if len(page.Entries) != 1 || page.Entries[0].Scope != DefaultScopeValue {
+		t.Fatalf("unexpected audit entries: %+v", page.Entries)
 	}
 }
 

@@ -28,12 +28,12 @@ function AppShellLayout() {
           <p className="eyebrow">Synchrono City</p>
           <h1>Map-native coordination for sovereign communities.</h1>
           <p className="hero-copy">
-            Phase 2 adds application-defined places, live geo-chat notes, profile context,
-            and geohash-scoped room intent on top of the existing client shell.
+            Phase 3 adds relay governance: standing, guest and block policy, room permissions,
+            and audit visibility on top of the map-native social layer.
           </p>
         </div>
         <div className="status-panel">
-          <span className="status-pill">Roadmap: Phase 2</span>
+          <span className="status-pill">Roadmap: Phase 3</span>
           <dl className="metric-list">
             <div>
               <dt>Live tiles</dt>

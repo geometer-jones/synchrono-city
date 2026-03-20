@@ -37,10 +37,10 @@ docker compose up --build
 
 ## Implementation Status
 
-The repository now includes the Phase 1 foundation plus the Phase 2 social layer:
+The repository now includes the Phase 1 foundation, Phase 2 social layer, and Phase 3 governance surface:
 
-- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, and a global geohash-scoped call overlay
-- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging, LiveKit token vending, a `strfry` policy shim, and public social bootstrap/note/call-intent endpoints for the web app
+- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, a global geohash-scoped call overlay, and authenticated governance workflows for guest list, blocklist, standing, room permissions, and audit review
+- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging with cursor pagination, LiveKit token vending, a `strfry` policy shim, and public social/bootstrap and admin governance endpoints for the web app
 - `db/migrations`: initial Postgres schema for policy, standing, sessions, and audit
 - `runbooks`: operator runbooks from the roadmap
 - `apps/concierge/relay-strfry.conf.example`: sample `strfry` write-policy plugin wiring for the relay shim
@@ -82,6 +82,8 @@ docker compose up --build
   Mission, principles, and political/product framing.
 - [ARCHITECTURE.md](ARCHITECTURE.md)
   Client-layer behavior, system topology, and key flows.
+- [CLIENT_SPEC.md](CLIENT_SPEC.md)
+  UI contract, visual direction, and generation rules for future client work.
 - [PROTOCOL.md](PROTOCOL.md)
   Interoperable contracts, event kinds, auth, storage, and relay policy surfaces.
 - [OPERATIONS.md](OPERATIONS.md)

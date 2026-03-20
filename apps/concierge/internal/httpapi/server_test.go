@@ -190,6 +190,150 @@ func TestAdminStandingEnablesRelayAuthorization(t *testing.T) {
 	}
 }
 
+func TestAdminPoliciesListFiltersByPolicyType(t *testing.T) {
+	policyStore := store.NewMemory()
+	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: operatorPubkey,
+	}, policyStore)
+
+	for _, record := range []store.PolicyAssignment{
+		{SubjectPubkey: "npub1guest", PolicyType: "guest", GrantedByPubkey: operatorPubkey},
+		{SubjectPubkey: "npub1blocked", PolicyType: "block", GrantedByPubkey: operatorPubkey},
+	} {
+		if _, err := policyStore.CreatePolicyAssignment(t.Context(), record); err != nil {
+			t.Fatalf("seed policy assignment: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/admin/policies?policy_type=guest", nil)
+	withNIP98Auth(t, req, operatorSecretKey(t), nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		Entries []store.PolicyAssignment `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Entries) != 1 || response.Entries[0].PolicyType != "guest" {
+		t.Fatalf("unexpected entries: %+v", response.Entries)
+	}
+}
+
+func TestAdminRoomPermissionsListFiltersByRoomID(t *testing.T) {
+	policyStore := store.NewMemory()
+	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: operatorPubkey,
+	}, policyStore)
+
+	for _, record := range []store.RoomPermission{
+		{
+			SubjectPubkey:   "npub1member",
+			RoomID:          "geo:npub1operator:9q8yyk",
+			CanJoin:         true,
+			CanSubscribe:    true,
+			GrantedByPubkey: operatorPubkey,
+		},
+		{
+			SubjectPubkey:   "npub1other",
+			RoomID:          "geo:npub1operator:9q8yym",
+			CanJoin:         true,
+			CanSubscribe:    true,
+			GrantedByPubkey: operatorPubkey,
+		},
+	} {
+		if _, err := policyStore.CreateRoomPermission(t.Context(), record); err != nil {
+			t.Fatalf("seed room permission: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/admin/room-permissions?room_id=geo:npub1operator:9q8yyk", nil)
+	withNIP98Auth(t, req, operatorSecretKey(t), nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		Entries []store.RoomPermission `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Entries) != 1 || response.Entries[0].RoomID != "geo:npub1operator:9q8yyk" {
+		t.Fatalf("unexpected entries: %+v", response.Entries)
+	}
+}
+
+func TestAdminAuditReturnsCursorPagination(t *testing.T) {
+	policyStore := store.NewMemory()
+	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: operatorPubkey,
+	}, policyStore)
+
+	baseTime := time.Date(2026, 3, 20, 8, 0, 0, 0, time.UTC)
+	for index := 0; index < 3; index++ {
+		if _, err := policyStore.CreateAuditEntry(t.Context(), store.AuditEntry{
+			ActorPubkey:  operatorPubkey,
+			Action:       "policy.assignment.created",
+			TargetPubkey: "npub1member",
+			Scope:        "relay",
+			Metadata:     map[string]string{"sequence": string(rune('1' + index))},
+			CreatedAt:    baseTime.Add(time.Duration(index) * time.Minute),
+		}); err != nil {
+			t.Fatalf("seed audit entry: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/admin/audit?limit=2", nil)
+	withNIP98Auth(t, req, operatorSecretKey(t), nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var pageOne store.AuditEntryPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &pageOne); err != nil {
+		t.Fatalf("decode page one: %v", err)
+	}
+	if len(pageOne.Entries) != 2 || pageOne.NextCursor == "" {
+		t.Fatalf("unexpected page one: %+v", pageOne)
+	}
+
+	nextReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/admin/audit?limit=2&cursor="+pageOne.NextCursor, nil)
+	withNIP98Auth(t, nextReq, operatorSecretKey(t), nil)
+	nextRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(nextRec, nextReq)
+
+	if nextRec.Code != http.StatusOK {
+		t.Fatalf("expected page two 200, got %d", nextRec.Code)
+	}
+
+	var pageTwo store.AuditEntryPage
+	if err := json.Unmarshal(nextRec.Body.Bytes(), &pageTwo); err != nil {
+		t.Fatalf("decode page two: %v", err)
+	}
+	if len(pageTwo.Entries) != 1 || pageTwo.NextCursor != "" {
+		t.Fatalf("unexpected page two: %+v", pageTwo)
+	}
+}
+
 func TestTokenRequiresRoomPermission(t *testing.T) {
 	policyStore := store.NewMemory()
 	srv := NewServer(config.Config{

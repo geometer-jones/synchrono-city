@@ -51,6 +51,7 @@ type CallIntentPayload = {
 
 type AppStateValue = {
   currentUser: ParticipantProfile;
+  relayOperatorPubkey: string;
   feedSegments: typeof feedSegments;
   places: Place[];
   profiles: ParticipantProfile[];
@@ -129,6 +130,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const value = useMemo<AppStateValue>(
     () => ({
       currentUser,
+      relayOperatorPubkey,
       feedSegments,
       places: effectivePlaces,
       profiles: effectiveProfiles,

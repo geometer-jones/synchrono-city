@@ -225,6 +225,10 @@ func (s *Server) handleAdminPolicyCheck(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminPoliciesList(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
@@ -288,6 +292,10 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminStanding(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminStandingList(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
@@ -349,6 +357,10 @@ func (s *Server) handleAdminStanding(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminRoomPermissions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminRoomPermissionsList(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
 		return
@@ -424,22 +436,77 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 0
-	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
-		parsed, err := strconv.Atoi(rawLimit)
-		if err != nil || parsed < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": "limit must be a non-negative integer"})
-			return
-		}
-		limit = parsed
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return
 	}
-	entries, err := s.store.ListAuditEntries(r.Context(), limit)
+	page, err := s.store.ListAuditEntries(r.Context(), store.AuditEntryQuery{
+		Cursor: strings.TrimSpace(r.URL.Query().Get("cursor")),
+		Limit:  limit,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (s *Server) handleAdminPoliciesList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parsePolicyAssignmentQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListPolicyAssignments(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
+func (s *Server) handleAdminStandingList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parseStandingRecordQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListStandingRecords(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
+func (s *Server) handleAdminRoomPermissionsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parseRoomPermissionQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListRoomPermissions(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
 }
 
 func (s *Server) handleRelayAuthorize(w http.ResponseWriter, r *http.Request) {
@@ -544,6 +611,96 @@ func (s *Server) logAuditFailure(err error) {
 	if err != nil {
 		log.Printf("audit log write failed: %v", err)
 	}
+}
+
+func parseOptionalLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
+	limit := 0
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": "limit must be a non-negative integer"})
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
+}
+
+func parsePolicyAssignmentQuery(w http.ResponseWriter, r *http.Request) (store.PolicyAssignmentQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.PolicyAssignmentQuery{}, false
+	}
+
+	query := store.PolicyAssignmentQuery{
+		PolicyType:     strings.TrimSpace(r.URL.Query().Get("policy_type")),
+		Scope:          strings.TrimSpace(r.URL.Query().Get("scope")),
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+
+	if subject := strings.TrimSpace(r.URL.Query().Get("subject_pubkey")); subject != "" {
+		validated, err := validatePubkey(subject)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.PolicyAssignmentQuery{}, false
+		}
+		query.SubjectPubkey = validated
+	}
+	if query.PolicyType != "" {
+		validated, err := validatePolicyType(query.PolicyType)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.PolicyAssignmentQuery{}, false
+		}
+		query.PolicyType = validated
+	}
+
+	return query, true
+}
+
+func parseStandingRecordQuery(w http.ResponseWriter, r *http.Request) (store.StandingRecordQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.StandingRecordQuery{}, false
+	}
+
+	query := store.StandingRecordQuery{
+		Scope:          strings.TrimSpace(r.URL.Query().Get("scope")),
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+	if subject := strings.TrimSpace(r.URL.Query().Get("subject_pubkey")); subject != "" {
+		validated, err := validatePubkey(subject)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.StandingRecordQuery{}, false
+		}
+		query.SubjectPubkey = validated
+	}
+	return query, true
+}
+
+func parseRoomPermissionQuery(w http.ResponseWriter, r *http.Request) (store.RoomPermissionQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.RoomPermissionQuery{}, false
+	}
+
+	query := store.RoomPermissionQuery{
+		RoomID:         strings.TrimSpace(r.URL.Query().Get("room_id")),
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+	if subject := strings.TrimSpace(r.URL.Query().Get("subject_pubkey")); subject != "" {
+		validated, err := validatePubkey(subject)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.RoomPermissionQuery{}, false
+		}
+		query.SubjectPubkey = validated
+	}
+	return query, true
 }
 
 func decodeJSONBody(r *http.Request, target any) error {

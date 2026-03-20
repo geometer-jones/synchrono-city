@@ -53,11 +53,46 @@ type AuditEntry struct {
 	CreatedAt    time.Time         `json:"created_at,omitempty"`
 }
 
+type PolicyAssignmentQuery struct {
+	SubjectPubkey  string
+	PolicyType     string
+	Scope          string
+	IncludeRevoked bool
+	Limit          int
+}
+
+type StandingRecordQuery struct {
+	SubjectPubkey  string
+	Scope          string
+	IncludeRevoked bool
+	Limit          int
+}
+
+type RoomPermissionQuery struct {
+	SubjectPubkey  string
+	RoomID         string
+	IncludeRevoked bool
+	Limit          int
+}
+
+type AuditEntryQuery struct {
+	Cursor string
+	Limit  int
+}
+
+type AuditEntryPage struct {
+	Entries     []AuditEntry `json:"entries"`
+	NextCursor  string       `json:"next_cursor,omitempty"`
+}
+
 type Store interface {
 	CreatePolicyAssignment(context.Context, PolicyAssignment) (PolicyAssignment, error)
 	CreateStandingRecord(context.Context, StandingRecord) (StandingRecord, error)
 	CreateRoomPermission(context.Context, RoomPermission) (RoomPermission, error)
-	ListAuditEntries(context.Context, int) ([]AuditEntry, error)
+	ListPolicyAssignments(context.Context, PolicyAssignmentQuery) ([]PolicyAssignment, error)
+	ListStandingRecords(context.Context, StandingRecordQuery) ([]StandingRecord, error)
+	ListRoomPermissions(context.Context, RoomPermissionQuery) ([]RoomPermission, error)
+	ListAuditEntries(context.Context, AuditEntryQuery) (AuditEntryPage, error)
 	CreateAuditEntry(context.Context, AuditEntry) (AuditEntry, error)
 	LatestStanding(context.Context, string, string) (StandingRecord, error)
 	LatestRoomPermission(context.Context, string, string) (RoomPermission, error)

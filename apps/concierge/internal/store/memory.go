@@ -55,17 +55,116 @@ func (s *MemoryStore) CreateRoomPermission(_ context.Context, permission RoomPer
 	return permission, nil
 }
 
-func (s *MemoryStore) ListAuditEntries(_ context.Context, limit int) ([]AuditEntry, error) {
+func (s *MemoryStore) ListPolicyAssignments(_ context.Context, query PolicyAssignmentQuery) ([]PolicyAssignment, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if limit <= 0 || limit > len(s.auditEntries) {
-		limit = len(s.auditEntries)
+	records := []PolicyAssignment{}
+	for index := len(s.policies) - 1; index >= 0; index-- {
+		record := s.policies[index]
+		if query.SubjectPubkey != "" && record.SubjectPubkey != query.SubjectPubkey {
+			continue
+		}
+		if query.PolicyType != "" && record.PolicyType != query.PolicyType {
+			continue
+		}
+		if query.Scope != "" && record.Scope != DefaultScope(query.Scope) {
+			continue
+		}
+		if !query.IncludeRevoked && record.Revoked {
+			continue
+		}
+		records = append(records, record)
+		if len(records) >= clampLimit(query.Limit) {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (s *MemoryStore) ListStandingRecords(_ context.Context, query StandingRecordQuery) ([]StandingRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	records := []StandingRecord{}
+	for index := len(s.standingRecords) - 1; index >= 0; index-- {
+		record := s.standingRecords[index]
+		if query.SubjectPubkey != "" && record.SubjectPubkey != query.SubjectPubkey {
+			continue
+		}
+		if query.Scope != "" && record.Scope != DefaultScope(query.Scope) {
+			continue
+		}
+		if !query.IncludeRevoked && record.Revoked {
+			continue
+		}
+		records = append(records, record)
+		if len(records) >= clampLimit(query.Limit) {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (s *MemoryStore) ListRoomPermissions(_ context.Context, query RoomPermissionQuery) ([]RoomPermission, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	records := []RoomPermission{}
+	for index := len(s.roomPermissions) - 1; index >= 0; index-- {
+		record := s.roomPermissions[index]
+		if query.SubjectPubkey != "" && record.SubjectPubkey != query.SubjectPubkey {
+			continue
+		}
+		if query.RoomID != "" && record.RoomID != query.RoomID {
+			continue
+		}
+		if !query.IncludeRevoked && record.Revoked {
+			continue
+		}
+		records = append(records, record)
+		if len(records) >= clampLimit(query.Limit) {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (s *MemoryStore) ListAuditEntries(_ context.Context, query AuditEntryQuery) (AuditEntryPage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cursorTime, cursorID, err := decodeAuditCursor(query.Cursor)
+	if err != nil {
+		return AuditEntryPage{}, err
 	}
 
 	entries := slices.Clone(s.auditEntries)
 	slices.Reverse(entries)
-	return entries[:limit], nil
+
+	filtered := make([]AuditEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !cursorTime.IsZero() {
+			if entry.CreatedAt.After(cursorTime) {
+				continue
+			}
+			if entry.CreatedAt.Equal(cursorTime) && entry.ID >= cursorID {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+
+	limit := clampLimit(query.Limit)
+	page := AuditEntryPage{}
+	if len(filtered) > limit {
+		page.Entries = filtered[:limit]
+		page.NextCursor = encodeAuditCursor(filtered[limit-1])
+		return page, nil
+	}
+
+	page.Entries = filtered
+	return page, nil
 }
 
 func (s *MemoryStore) CreateAuditEntry(_ context.Context, entry AuditEntry) (AuditEntry, error) {

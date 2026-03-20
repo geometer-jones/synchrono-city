@@ -59,10 +59,10 @@ Related docs:
 **Duration:** 6-8 weeks
 
 **Deliverables:**
-- [ ] Roles and standing
-- [ ] Guest list and blocklist
-- [ ] Room permissions
-- [ ] Audit log
+- [x] Roles and standing
+- [x] Guest list and blocklist
+- [x] Room permissions
+- [x] Audit log
 - [ ] **Place memories** (deferred delight)
 - [ ] **Spontaneous ping** (deferred delight)
 
