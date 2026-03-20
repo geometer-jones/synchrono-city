@@ -318,12 +318,12 @@ export function SettingsRoute() {
   }
 
   return (
-    <section className="panel">
+    <section className="panel route-surface route-surface-settings">
       <p className="section-label">Settings</p>
-      <div className="detail-header">
+      <div className="detail-header route-header route-header-governance">
         <div>
           <h2>Relay Governance</h2>
-          <p className="muted">
+          <p className="muted route-header-copy">
             Phase 3 operator controls for roles, policy, room access, and privileged audit review.
           </p>
         </div>

@@ -28,6 +28,58 @@ export function CallOverlay() {
 
       {activeCall.minimized ? null : (
         <>
+          <div className="call-status-grid">
+            <span className={activeCall.transport === "livekit" ? "thread-pill live" : "thread-pill"}>
+              {activeCall.transport === "livekit" ? "LiveKit ready" : "Local room intent"}
+            </span>
+            <span
+              className={
+                activeCall.connectionState === "connected" ? "thread-pill live" : "thread-pill"
+              }
+            >
+              {activeCall.connectionState === "connected"
+                ? "Connected"
+                : activeCall.connectionState === "connecting"
+                  ? "Connecting"
+                  : activeCall.connectionState === "failed"
+                    ? "Policy blocked"
+                    : "Preview"}
+            </span>
+            {activeCall.canPublish !== undefined ? (
+              <span className={activeCall.canPublish ? "thread-pill live" : "thread-pill"}>
+                Publish {activeCall.canPublish ? "allowed" : "blocked"}
+              </span>
+            ) : null}
+            {activeCall.canSubscribe !== undefined ? (
+              <span className={activeCall.canSubscribe ? "thread-pill live" : "thread-pill"}>
+                Subscribe {activeCall.canSubscribe ? "allowed" : "blocked"}
+              </span>
+            ) : null}
+          </div>
+          <p className="muted overlay-status-copy">{activeCall.statusMessage}</p>
+          {activeCall.identity || activeCall.liveKitURL || activeCall.expiresAt ? (
+            <dl className="call-meta-list">
+              {activeCall.identity ? (
+                <div>
+                  <dt>Identity</dt>
+                  <dd>{activeCall.identity}</dd>
+                </div>
+              ) : null}
+              {activeCall.liveKitURL ? (
+                <div>
+                  <dt>LiveKit URL</dt>
+                  <dd>{activeCall.liveKitURL}</dd>
+                </div>
+              ) : null}
+              {activeCall.expiresAt ? (
+                <div>
+                  <dt>Token expiry</dt>
+                  <dd>{activeCall.expiresAt}</dd>
+                </div>
+              ) : null}
+            </dl>
+          ) : null}
+
           <div className="call-indicators">
             <span className={activeCall.mic ? "thread-pill live" : "thread-pill"}>Mic {activeCall.mic ? "on" : "off"}</span>
             <span className={activeCall.cam ? "thread-pill live" : "thread-pill"}>Cam {activeCall.cam ? "on" : "off"}</span>

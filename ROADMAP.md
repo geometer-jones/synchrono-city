@@ -71,9 +71,9 @@ Related docs:
 **Duration:** 4-6 weeks
 
 **Deliverables:**
-- [ ] LiveKit integration
-- [ ] Blossom integration
-- [ ] Rooms on map
+- [x] LiveKit integration
+- [x] Blossom integration
+- [x] Rooms on map
 
 ### Phase 5: Intelligence
 

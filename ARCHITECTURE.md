@@ -69,6 +69,7 @@ The client should treat active LiveKit participation as the authoritative render
 
 The map surface aggregates by canonical geohash tile.
 
+- The World map should remain pannable and zoomable while preserving place overlays and the global call surface
 - A circle marker represents the tile's combined note and call activity
 - The numeral written inside the marker is only the count of kind `1` events in that tile
 - If the tile has an active call and zero kind `1` notes, the marker should display `0`
@@ -120,6 +121,7 @@ When a user joins a geohash-scoped call, a global call overlay provides persiste
 Dense map regions may cluster adjacent geohash tiles for readability.
 
 - Cluster markers should sum note counts across the included tiles
+- Clustering should respond to zoom level and should dissolve into per-tile markers as the user zooms in
 - Cluster expansion should preserve underlying per-tile call state
 - The cluster card should surface merged call state with clear dividers between each underlying tile call
 - Each divided section should show the tile's latest note preview and its participant roster when active
@@ -131,7 +133,9 @@ Relay operators may organize local public conversation around places, venues, ne
 - Public chat remains standard Nostr event flow on the relay
 - Moderation policy is enforced by operator controls and Concierge-owned local policy
 - Clients may present place-based public rooms in the UI, but those rooms are an application concept rather than a separate relay protocol
-- Tapping a marker should open `Chats` scoped to the exact geohash as a stack of kind `1` notes
+- Tapping a marker should set the user's active place presence to that exact geohash and join the geohash-scoped call for that tile
+- Joining from marker selection should happen immediately without a secondary confirmation step
+- After presence is set, the client may reveal tile detail in place and provide a path into `Chats` scoped to the exact geohash as a stack of kind `1` notes
 - Selecting a note from that chat stack should open the note in `Pulse`
 
 #### Route Interoperability

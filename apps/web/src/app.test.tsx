@@ -1,31 +1,84 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const liveKitMocks = vi.hoisted(() => {
+  const session = {
+    disconnect: vi.fn(),
+    setMicrophoneEnabled: vi.fn(async (enabled: boolean) => enabled),
+    setCameraEnabled: vi.fn(async (enabled: boolean) => enabled),
+    setScreenShareEnabled: vi.fn(async (enabled: boolean) => enabled),
+    setDeafenEnabled: vi.fn()
+  };
+
+  return {
+    connectLiveKitSessionMock: vi.fn(),
+    session
+  };
+});
+
+vi.mock("./livekit-session", () => ({
+  connectLiveKitSession: liveKitMocks.connectLiveKitSessionMock
+}));
 
 import { AppShell } from "./routes/app-shell";
 import { ChatsRoute } from "./routes/chats-route";
 import { PulseRoute } from "./routes/pulse-route";
 import { SettingsRoute } from "./routes/settings-route";
 import { SplashRoute } from "./routes/splash-route";
+import { ToastProvider } from "./toast";
 import { WorldRoute } from "./routes/world-route";
 
 function renderRouter(entry: string) {
   const user = userEvent.setup();
   render(
-    <MemoryRouter initialEntries={[entry]}>
-      <Routes>
-        <Route path="/" element={<SplashRoute />} />
-        <Route path="/app" element={<AppShell />}>
-          <Route index element={<WorldRoute />} />
-          <Route path="chats" element={<ChatsRoute />} />
-          <Route path="pulse" element={<PulseRoute />} />
-          <Route path="settings" element={<SettingsRoute />} />
-        </Route>
-      </Routes>
-    </MemoryRouter>
+    <ToastProvider>
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route path="/" element={<SplashRoute />} />
+          <Route path="/app" element={<AppShell />}>
+            <Route index element={<WorldRoute />} />
+            <Route path="chats" element={<ChatsRoute />} />
+            <Route path="pulse" element={<PulseRoute />} />
+            <Route path="settings" element={<SettingsRoute />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </ToastProvider>
   );
   return { user };
+}
+
+function primeLiveKitMock() {
+  liveKitMocks.session.disconnect.mockReset();
+  liveKitMocks.session.setMicrophoneEnabled.mockReset();
+  liveKitMocks.session.setCameraEnabled.mockReset();
+  liveKitMocks.session.setScreenShareEnabled.mockReset();
+  liveKitMocks.session.setDeafenEnabled.mockReset();
+  liveKitMocks.connectLiveKitSessionMock.mockReset();
+  liveKitMocks.connectLiveKitSessionMock.mockImplementation(async (options) => {
+    options.onConnectionStatus("connected", "LiveKit room connected.");
+    options.onParticipantsChanged([
+      {
+        identity: "npub1scout",
+        mic: true,
+        cam: false,
+        screenshare: false,
+        isSpeaking: false,
+        isLocal: true
+      },
+      {
+        identity: "npub1aurora",
+        mic: true,
+        cam: false,
+        screenshare: false,
+        isSpeaking: true,
+        isLocal: false
+      }
+    ]);
+    return liveKitMocks.session;
+  });
 }
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -37,8 +90,11 @@ function jsonResponse(payload: unknown, status = 200) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  primeLiveKitMock();
   delete window.nostr;
 });
+
+primeLiveKitMock();
 
 describe("app shell", () => {
   it("renders the splash route", () => {
@@ -51,20 +107,90 @@ describe("app shell", () => {
   it("renders the world route with place metadata", () => {
     renderRouter("/app");
 
-    expect(
-      screen.getByRole("heading", { name: /map-native coordination for sovereign communities/i })
-    ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /world places/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /civic plaza · 9q8yyk/i })).toBeInTheDocument();
+    expect(screen.getByText(/map-native coordination for sovereign communities/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /presence lives on the map/i })).toBeInTheDocument();
+    expect(screen.getByText(/tap a marker to set your place presence and join that tile immediately/i)).toBeInTheDocument();
   });
 
-  it("joins a geohash-scoped room from world and shows the global call overlay", async () => {
+  it("selects a marker, joins a geohash-scoped room, and shows the global call overlay", async () => {
     const { user } = renderRouter("/app");
 
-    await user.click(screen.getAllByRole("button", { name: /join room/i })[0]);
+    await user.click(screen.getByRole("button", { name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i }));
 
+    expect(await screen.findByLabelText(/selected place civic plaza/i)).toBeInTheDocument();
     expect((await screen.findAllByText(/geo:npub1operator:9q8yyk/i)).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /leave room/i })).toBeInTheDocument();
+  });
+
+  it("upgrades a joined room with a LiveKit token and uploads place media to Blossom", async () => {
+    let uploadCalled = false;
+
+    window.nostr = {
+      getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
+      signEvent: vi.fn().mockImplementation(async (event) => ({
+        ...event,
+        id: `signed-${event.created_at}`,
+        pubkey: "npub1operator",
+        sig: "sig"
+      }))
+    };
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+
+      if (url.pathname === "/api/v1/token") {
+        expect(headers.get("Authorization")).toMatch(/^Nostr /);
+        return jsonResponse({
+          decision: "allow",
+          reason: "room_permission",
+          token: {
+            token: "jwt-token",
+            identity: "npub1operator",
+            room_id: "geo:npub1operator:9q8yyk",
+            livekit_url: "ws://livekit.example.test",
+            expires_at: "2026-03-20T12:10:00Z",
+            grants: {
+              room_join: true,
+              can_publish: true,
+              can_subscribe: true
+            }
+          }
+        });
+      }
+
+      if (url.pathname === "/upload") {
+        uploadCalled = true;
+        expect(headers.get("Authorization")).toMatch(/^Nostr /);
+        return jsonResponse({
+          url: "http://localhost:3001/blossom-room-photo.png"
+        });
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+    });
+
+    const { user } = renderRouter("/app");
+
+    await user.click(screen.getByRole("button", { name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i }));
+    expect(await screen.findByText(/livekit ready/i)).toBeInTheDocument();
+    expect(await screen.findByText(/ws:\/\/livekit\.example\.test/i)).toBeInTheDocument();
+    expect(liveKitMocks.connectLiveKitSessionMock).toHaveBeenCalledTimes(1);
+    expect(liveKitMocks.session.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+
+    const mediaInput = screen.getByLabelText(/select media/i) as HTMLInputElement;
+    const file = new File(["photo"], "room-photo.png", { type: "image/png" });
+    fireEvent.change(mediaInput, { target: { files: [file] } });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /upload to blossom/i })).toBeEnabled()
+    );
+    await user.click(screen.getByRole("button", { name: /upload to blossom/i }));
+
+    await waitFor(() => expect(uploadCalled).toBe(true));
+    expect(await screen.findByText(/latest upload: room-photo\.png/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /toggle cam/i }));
+    expect(liveKitMocks.session.setCameraEnabled).toHaveBeenCalledWith(true);
   });
 
   it("publishes a place note from chats and exposes it in pulse", async () => {

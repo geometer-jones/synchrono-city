@@ -23,35 +23,41 @@ function AppShellLayout() {
 
   return (
     <div className="app-shell">
-      <header className="hero">
-        <div>
+      <header className="app-bar">
+        <div className="app-bar-brand">
           <p className="eyebrow">Synchrono City</p>
-          <h1>Map-native coordination for sovereign communities.</h1>
-          <p className="hero-copy">
-            Phase 3 adds relay governance: standing, guest and block policy, room permissions,
-            and audit visibility on top of the map-native social layer.
+          <strong>Map-native coordination for sovereign communities.</strong>
+          <p className="muted app-bar-copy">
+            World stays map-first. Governance and media stay inside the same shell.
           </p>
         </div>
-        <div className="status-panel">
-          <span className="status-pill">Roadmap: Phase 3</span>
-          <dl className="metric-list">
-            <div>
-              <dt>Live tiles</dt>
-              <dd>{sceneHealth.activeTiles} application-defined places</dd>
-            </div>
-            <div>
-              <dt>Media room</dt>
-              <dd>{activeCall ? activeCall.roomID : "No active room joined"}</dd>
-            </div>
-            <div>
-              <dt>Open seats</dt>
-              <dd>{sceneHealth.openSeats} seats before place capacity fills</dd>
-            </div>
-          </dl>
+        <nav className="app-nav app-nav-desktop" aria-label="Primary">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="app-bar-status">
+          <span className="status-pill status-pill-live">Roadmap: Phase 4</span>
+          <span className="status-pill">{sceneHealth.activeTiles} live tiles</span>
+          <span className="status-pill">{sceneHealth.openSeats} open seats</span>
+          <span className={activeCall ? "status-pill status-pill-live" : "status-pill"}>
+            {activeCall ? activeCall.geohash : "No active room"}
+          </span>
         </div>
       </header>
 
-      <nav className="top-nav" aria-label="Primary">
+      <main className="content">
+        <Outlet />
+      </main>
+
+      <nav className="app-nav app-nav-mobile" aria-label="Primary mobile">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -63,10 +69,6 @@ function AppShellLayout() {
           </NavLink>
         ))}
       </nav>
-
-      <main className="content">
-        <Outlet />
-      </main>
 
       <CallOverlay />
     </div>

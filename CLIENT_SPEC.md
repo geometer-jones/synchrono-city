@@ -6,6 +6,7 @@ Use it together with `ARCHITECTURE.md`:
 
 - `ARCHITECTURE.md` defines product behavior, system topology, and protocol-adjacent UX
 - `CLIENT_SPEC.md` defines the UI contract, visual direction, and generation rules for `apps/web`
+- `CLIENT_TASKS.md` defines the implementation backlog for bringing the current client into alignment with this spec
 
 If the implemented client and this spec diverge, update this document before or alongside UI work.
 
@@ -126,6 +127,7 @@ Must include:
 - clear route navigation for World, Chats, Pulse, Settings
 - visible scene/operator framing
 - persistent call overlay mounting point
+- an app bar that reserves the only permanent non-overlay chrome above the World surface
 
 Desired feel:
 
@@ -142,7 +144,8 @@ Purpose:
 Must include:
 
 - map or map-like world surface
-- list or card treatment for places
+- full-viewport map usage below the app bar
+- pannable and zoomable map interaction
 - selected-place detail
 - room/call affordance
 - note creation and recent note visibility
@@ -152,6 +155,47 @@ Desired feel:
 - spatial first
 - dense enough to feel alive
 - readable on laptop and mobile without collapsing into a generic feed
+
+Layout rule:
+
+- In World, the map owns the screen.
+- The map should fill the available viewport beneath the app bar.
+- The map must remain pannable and zoomable while the user is in World.
+- Place detail, room actions, note composition, and recent activity should appear as overlays, sheets, drawers, or anchored cards on top of the map rather than as stacked panels that push the map down the page.
+- The app bar is the only persistent non-overlay chrome that should reduce map height.
+
+Marker contract:
+
+- Markers aggregate by canonical geohash tile.
+- Render one marker per visible tile with activity.
+- A tile with neither notes nor an active call should render no marker.
+- The marker shape should remain a simple circle unless clustering or another explicit map-density rule requires otherwise.
+- The numeral inside the marker is the count of kind `1` notes for that tile only.
+- If a tile has an active call and zero notes, the marker should still render and should display `0`.
+- Marker styling may communicate live-call presence, but the number itself should not include participant count.
+- Tapping or clicking a marker sets the user's active place presence to that exact geohash tile.
+- Selecting a marker should immediately initiate the join flow for that tile's call/presence context.
+- Marker selection should not require a secondary confirmation step before joining.
+- After selection, tile detail should appear in an overlay, anchored card, sheet, or equivalent map-layer surface without giving up the full-screen map.
+- Marker-driven detail must preserve a fast path into the exact geohash conversation after presence has been set.
+- Marker placement must stay anchored to the map as the user pans or zooms.
+
+Marker card contract:
+
+- The marker detail surface represents exactly one geohash tile unless clustering is active.
+- It should make the selected place/presence state obvious.
+- It should show the latest note preview for that exact geohash when one exists.
+- It should show the current participant roster for that tile when a call is active.
+- Participant rows should expose media-state indicators for mic, camera, screenshare, and deafen.
+- Profile inspection from the marker detail surface should route into Pulse.
+
+Clustering contract:
+
+- Dense areas may cluster adjacent tiles for readability.
+- Cluster counts should sum note counts across included tiles.
+- Cluster behavior should respond to zoom level and dissolve as the user zooms in.
+- Cluster expansion must preserve per-tile call state.
+- Cluster detail should keep underlying tiles legible rather than flattening them into one synthetic place.
 
 ### Chats `/app/chats`
 
@@ -256,26 +300,103 @@ Generated UI work should not:
 - turn Settings into a separate branded sub-product
 - break the global call overlay model
 
-## 8. Design Variables To Lock Next
+## 8. Generation Profile
 
-These are the highest-value fields to refine so future generation becomes more deterministic.
+Future generated client work should treat the following as the current default brief unless a newer revision replaces it.
 
-| Area | Current baseline | What should be decided next |
+```yaml
+client_direction:
+  status: provisional
+  brand_adjectives:
+    - civic
+    - atmospheric
+    - sovereign
+    - editorial
+    - map-native
+  anti_adjectives:
+    - playful
+    - glossy-startup
+    - enterprise-generic
+    - consumer-social
+    - gamified
+  typography:
+    ui_face: "IBM Plex Sans or equivalent practical grotesk"
+    display_face: "Iowan Old Style or equivalent old-style serif"
+    rule: "Use the serif sparingly for conviction and narrative emphasis, not for dense UI."
+  palette:
+    base: "near-black blue-green"
+    primary_accent: "warm orange/coral"
+    secondary_atmosphere: "cool blue"
+    status_rule: "Operational states must remain semantically distinct from brand accents."
+  material:
+    direction: "layered dark surfaces with restrained glass"
+    rule: "Keep depth and atmosphere, but reduce excessive blur or gloss on dense operational screens."
+  density:
+    splash: "spacious"
+    app_shell: "medium"
+    world: "map-first, chrome-light"
+    chats: "dense"
+    pulse: "medium"
+    settings: "dense"
+  world_surface:
+    primary_metaphor: "civic atlas"
+    secondary_metaphor: "field report"
+    layout_rule: "Map fills the viewport below the app bar; supporting UI lives in overlays."
+    avoid:
+      - "trading terminal"
+      - "toy map"
+      - "generic activity feed"
+  navigation:
+    tone: "calm and institutional"
+    rule: "Navigation should orient without dominating the page."
+    placement: "top app bar on desktop, bottom app bar on mobile"
+  motion:
+    level: "subtle"
+    usage:
+      - "atmospheric movement on splash"
+      - "gentle transitions for overlays and route changes"
+    avoid:
+      - "constant motion on operational screens"
+      - "decorative motion without state meaning"
+  copy:
+    voice: "formal, ideological, infrastructural, composed"
+    rule: "Prefer direct language over hype, jokes, or engagement-product phrasing."
+  governance:
+    visual_rule: "Governance belongs inside the same product shell as the social surfaces."
+    density_rule: "Settings may be denser than World, but should not look like a separate enterprise console."
+  mobile:
+    priority: "core-task parity"
+    rule: "World, chats, profile inspection, and call controls must remain first-class on mobile. Dense governance detail may collapse but must stay usable."
+```
+
+## 9. Decision Worksheet
+
+Use this section to replace provisional defaults with explicit decisions. Keep answers short and update the generation profile above when a decision is made.
+
+| Decision | Current provisional answer | Replace with your final answer |
 | --- | --- | --- |
-| Brand adjectives | atmospheric, civic, sovereign, editorial | the exact 3-5 adjectives the client must always optimize for |
-| Typography | sans UI + serif display | exact font pair or acceptable substitutes |
-| Density | medium, spacious cards | preferred density by route: sparse / medium / dense |
-| World surface | hybrid map + panels | whether the world should feel more map-tool, atlas, transit-board, or field-report |
-| Navigation tone | calm pill nav | whether nav should feel more tactical, institutional, or invisible |
-| Material treatment | dark glass/panel depth | whether this should stay glassy, become flatter, or become more tactile |
-| Motion level | low atmospheric motion | whether the product should feel mostly still, subtly alive, or more kinetic |
-| Copy voice | ideological but composed | how formal, militant, friendly, or technical the voice should be |
-| Governance styling | integrated with product shell | how much admin density is acceptable before the surface feels detached |
-| Mobile priority | responsive, but desktop-led | whether mobile should be parity, reduced, or primary |
+| Brand adjectives | civic, atmospheric, sovereign, editorial, map-native | |
+| UI/display font pair | IBM Plex Sans + Iowan Old Style | |
+| World metaphor | civic atlas with field-report energy | |
+| World layout | full-screen map below app bar; supporting UI in overlays | |
+| Material treatment | layered dark surfaces with restrained glass | |
+| Navigation tone | calm and institutional | |
+| Navigation placement | top app bar on desktop, bottom app bar on mobile | |
+| Motion level | subtle | |
+| Copy voice | formal, ideological, infrastructural | |
+| Settings density | dense but integrated | |
+| Mobile priority | core-task parity | |
 
-When those decisions are made, update this table with concrete answers rather than adding free-form notes elsewhere.
+### Fast prompts for future review
 
-## 9. Change Protocol
+- What should the World screen feel closest to: atlas, command map, transit board, or public bulletin?
+- Should route navigation live in a top app bar, bottom app bar, or split by device class?
+- Should the product feel more austere or more sensual than it does now?
+- Should Settings feel closer to an operator cockpit or a civic ledger?
+- Should typography feel more literary, more technical, or exactly as it is now?
+- On mobile, should the app preserve density or sacrifice density for clarity?
+
+## 10. Change Protocol
 
 For future client changes:
 
@@ -286,7 +407,7 @@ For future client changes:
 5. Implement the smallest viable change.
 6. Verify the affected route still fits the contracts above.
 
-## 10. Acceptance Checklist
+## 11. Acceptance Checklist
 
 A generated client change is not complete unless it:
 

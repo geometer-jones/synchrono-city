@@ -23,11 +23,23 @@ export function PulseRoute() {
   const profileNotes = profile ? listNotesByAuthor(profile.pubkey) : [];
   const profilePlace = profile?.homeGeohash ? getPlace(profile.homeGeohash) : undefined;
   const profileParticipants = profilePlace ? getPlaceParticipants(profilePlace.geohash) : [];
+  const recentNotes = listRecentNotes();
 
   return (
-    <section className="panel">
-      <p className="section-label">Pulse</p>
-      <h2>Relay feed projection</h2>
+    <section className="panel route-surface route-surface-pulse">
+      <div className="route-header">
+        <div>
+          <p className="section-label">Pulse</p>
+          <h2>Relay feed projection</h2>
+          <p className="muted route-header-copy">
+            Pulse is the profile and note-context layer that sits behind the visible scene.
+          </p>
+        </div>
+        <div className="route-header-meta">
+          <span className="thread-pill">{feedSegments.length} feed lanes</span>
+          <span className="thread-pill">{recentNotes.length} recent notes</span>
+        </div>
+      </div>
 
       {note ? (
         <article className="feature-card">
@@ -126,7 +138,7 @@ export function PulseRoute() {
       </div>
 
       <div className="note-list">
-        {listRecentNotes().map((recentNote) => {
+        {recentNotes.map((recentNote) => {
           const author = getProfile(recentNote.authorPubkey);
           const place = getPlace(recentNote.geohash);
 

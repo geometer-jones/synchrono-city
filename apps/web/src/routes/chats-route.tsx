@@ -48,10 +48,22 @@ export function ChatsRoute() {
   }
 
   return (
-    <section className="panel">
-      <p className="section-label">Chats</p>
-      <h2>Place-scoped note stacks</h2>
-      <div className="route-columns">
+    <section className="panel route-surface route-surface-chats">
+      <div className="route-header">
+        <div>
+          <p className="section-label">Chats</p>
+          <h2>Place-scoped note stacks</h2>
+          <p className="muted route-header-copy">
+            Threads stay attached to specific geohash rooms, not to a generic inbox.
+          </p>
+        </div>
+        <div className="route-header-meta">
+          <span className="thread-pill">{threads.length} threads</span>
+          {selectedThread?.activeCall ? <span className="thread-pill live">Room active</span> : null}
+        </div>
+      </div>
+
+      <div className="route-columns route-columns-threads">
         <div className="thread-list" role="list" aria-label="Geo-chat threads">
           {threads.map((thread) => (
             <button

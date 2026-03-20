@@ -71,6 +71,14 @@ export type CallSession = {
   roomID: string;
   placeTitle: string;
   participantPubkeys: string[];
+  transport: "local" | "livekit";
+  connectionState: "local_preview" | "connecting" | "connected" | "failed";
+  statusMessage: string;
+  identity?: string;
+  liveKitURL?: string;
+  expiresAt?: string;
+  canPublish?: boolean;
+  canSubscribe?: boolean;
   mic: boolean;
   cam: boolean;
   screenshare: boolean;

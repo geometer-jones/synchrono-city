@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren
 } from "react";
@@ -31,6 +32,8 @@ import {
   type ParticipantProfile,
   type Place
 } from "./data";
+import { connectLiveKitSession, type LiveKitParticipantState, type LiveKitSession } from "./livekit-session";
+import { hasNostrSigner, MediaAuthError, requestLiveKitToken, uploadBlossomFile } from "./media-client";
 import { showToast } from "./toast";
 
 type CallControl = "mic" | "cam" | "screenshare" | "deafen";
@@ -49,6 +52,18 @@ type CallIntentPayload = {
   participant_pubkeys: string[];
 };
 
+type PlaceMediaAsset = {
+  id: string;
+  geohash: string;
+  url: string;
+  mimeType: string;
+  sha256: string;
+  size: number;
+  fileName: string;
+  uploadedAt: string;
+  uploadedByPubkey: string;
+};
+
 type AppStateValue = {
   currentUser: ParticipantProfile;
   relayOperatorPubkey: string;
@@ -57,6 +72,7 @@ type AppStateValue = {
   profiles: ParticipantProfile[];
   notes: GeoNote[];
   activeCall: CallSession | null;
+  listPlaceMedia: (geohash: string) => PlaceMediaAsset[];
   getPlace: (geohash: string) => Place | undefined;
   getProfile: (pubkey: string) => ParticipantProfile | undefined;
   getNote: (noteID: string) => GeoNote | undefined;
@@ -69,6 +85,7 @@ type AppStateValue = {
   buildStoryExport: () => string;
   sceneHealth: ReturnType<typeof getSceneHealthStats>;
   createPlaceNote: (geohash: string, content: string) => GeoNote | null;
+  uploadPlaceMedia: (geohash: string, file: File, signal?: AbortSignal) => Promise<PlaceMediaAsset | null>;
   joinPlaceCall: (geohash: string) => void;
   leavePlaceCall: () => void;
   toggleCallControl: (control: CallControl) => void;
@@ -83,6 +100,9 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const [placesState, setPlacesState] = useState(seedPlaces);
   const [profilesState, setProfilesState] = useState(seedProfiles);
   const [notesState, setNotesState] = useState(seedNotes);
+  const [placeMediaState, setPlaceMediaState] = useState<PlaceMediaAsset[]>([]);
+  const activeCallRequestRef = useRef(0);
+  const liveKitSessionRef = useRef<LiveKitSession | null>(null);
 
   useEffect(() => {
     if (import.meta.env.MODE === "test") {
@@ -113,6 +133,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      liveKitSessionRef.current?.disconnect();
+      liveKitSessionRef.current = null;
+    };
+  }, []);
+
   const effectivePlaces = placesState.length > 0 ? placesState : seedPlaces;
   const effectiveProfiles = profilesState.length > 0 ? profilesState : seedProfiles;
   const effectiveNotes = notesState.length > 0 ? notesState : seedNotes;
@@ -127,6 +154,33 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     [effectivePlaces, effectiveNotes]
   );
 
+  function disconnectLiveKitSession() {
+    liveKitSessionRef.current?.disconnect();
+    liveKitSessionRef.current = null;
+  }
+
+  function syncLiveKitParticipants(
+    roomID: string,
+    geohash: string,
+    participants: LiveKitParticipantState[]
+  ) {
+    setActiveCall((current) => {
+      if (!current || current.roomID !== roomID || current.geohash !== geohash) {
+        return current;
+      }
+
+      const localParticipant = participants.find((participant) => participant.isLocal);
+
+      return {
+        ...current,
+        participantPubkeys: participants.map((participant) => participant.identity),
+        mic: localParticipant?.mic ?? current.mic,
+        cam: localParticipant?.cam ?? current.cam,
+        screenshare: localParticipant?.screenshare ?? current.screenshare
+      };
+    });
+  }
+
   const value = useMemo<AppStateValue>(
     () => ({
       currentUser,
@@ -136,6 +190,10 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       profiles: effectiveProfiles,
       notes: effectiveNotes,
       activeCall,
+      listPlaceMedia: (geohash) =>
+        placeMediaState
+          .filter((asset) => asset.geohash === geohash)
+          .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt)),
       getPlace: (geohash) => placeMap.get(geohash),
       getProfile: (pubkey) => profileMap.get(pubkey),
       getNote: (noteID) => noteMap.get(noteID),
@@ -210,18 +268,62 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         }
         return nextNote;
       },
+      uploadPlaceMedia: async (geohash, file, signal) => {
+        const place = placeMap.get(geohash);
+        if (!place) {
+          return null;
+        }
+
+        const upload = await uploadBlossomFile(file, signal);
+        const nextAsset: PlaceMediaAsset = {
+          id: `${upload.sha256}-${Date.now()}`,
+          geohash,
+          url: upload.url,
+          mimeType: upload.mimeType,
+          sha256: upload.sha256,
+          size: upload.size,
+          fileName: file.name,
+          uploadedAt: new Date().toISOString(),
+          uploadedByPubkey: currentUserPubkey
+        };
+
+        setPlaceMediaState((previous) => [nextAsset, ...previous]);
+        showToast(`Uploaded ${file.name} to Blossom for ${place.title}.`, "info");
+        return nextAsset;
+      },
       joinPlaceCall: (geohash) => {
         const place = placeMap.get(geohash);
         if (!place) {
           return;
         }
 
-        const applyIntent = (roomID: string, placeTitle: string, participantPubkeys: string[]) => {
+        disconnectLiveKitSession();
+
+        const requestID = activeCallRequestRef.current + 1;
+        activeCallRequestRef.current = requestID;
+
+        const applyIntent = (
+          roomID: string,
+          placeTitle: string,
+          participantPubkeys: string[],
+          overrides?: Partial<CallSession>
+        ) => {
           setActiveCall((current) => ({
             geohash,
             roomID,
             placeTitle,
             participantPubkeys,
+            transport: overrides?.transport ?? current?.transport ?? "local",
+            connectionState: overrides?.connectionState ?? current?.connectionState ?? "local_preview",
+            statusMessage:
+              overrides?.statusMessage ??
+              current?.statusMessage ??
+              "Room intent resolved locally.",
+            identity: overrides?.identity ?? current?.identity,
+            liveKitURL: overrides?.liveKitURL ?? current?.liveKitURL,
+            expiresAt: overrides?.expiresAt ?? current?.expiresAt,
+            canPublish: overrides?.canPublish ?? current?.canPublish,
+            canSubscribe: overrides?.canSubscribe ?? current?.canSubscribe,
             mic: current?.geohash === geohash ? current.mic : currentUser.mic,
             cam: current?.geohash === geohash ? current.cam : currentUser.cam,
             screenshare: current?.geohash === geohash ? current.screenshare : currentUser.screenshare,
@@ -230,41 +332,203 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           }));
         };
 
+        const applyIfCurrent = (
+          roomID: string,
+          placeTitle: string,
+          participantPubkeys: string[],
+          overrides?: Partial<CallSession>
+        ) => {
+          if (requestID !== activeCallRequestRef.current) {
+            return;
+          }
+          applyIntent(roomID, placeTitle, participantPubkeys, overrides);
+        };
+
         const fallbackParticipants = place.occupantPubkeys.includes(currentUserPubkey)
           ? place.occupantPubkeys
           : [currentUserPubkey, ...place.occupantPubkeys];
-        applyIntent(
-          `geo:${relayOperatorPubkey}:${geohash}`,
-          place.title,
-          fallbackParticipants
-        );
+        const fallbackRoomID = `geo:${relayOperatorPubkey}:${geohash}`;
+        const signerAvailable = hasNostrSigner();
 
-        if (import.meta.env.MODE !== "test") {
-          void apiFetch<CallIntentPayload>("/api/v1/social/call-intent", {
-            method: "POST",
-            body: JSON.stringify({
-              geohash,
-              pubkey: currentUserPubkey
-            })
-          }).then((payload) => {
-            applyIntent(payload.room_id, payload.place_title, payload.participant_pubkeys);
-          }).catch(() => {
-            showToast("Using fallback room. Server unavailable.", "info");
+        applyIntent(fallbackRoomID, place.title, fallbackParticipants, {
+          transport: "local",
+          connectionState: signerAvailable ? "connecting" : "local_preview",
+          statusMessage: signerAvailable
+            ? "Resolving LiveKit access for this room."
+            : "Signer required for LiveKit media. Room intent stays local."
+        });
+
+        const intentPromise =
+          import.meta.env.MODE === "test"
+            ? Promise.resolve<CallIntentPayload>({
+                geohash,
+                room_id: fallbackRoomID,
+                place_title: place.title,
+                participant_pubkeys: fallbackParticipants
+              })
+            : apiFetch<CallIntentPayload>("/api/v1/social/call-intent", {
+                method: "POST",
+                body: JSON.stringify({
+                  geohash,
+                  pubkey: currentUserPubkey
+                })
+              }).catch(() => {
+                showToast("Using fallback room. Server unavailable.", "info");
+                return {
+                  geohash,
+                  room_id: fallbackRoomID,
+                  place_title: place.title,
+                  participant_pubkeys: fallbackParticipants
+                };
+              });
+
+        void intentPromise.then(async (payload) => {
+          applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+            transport: "local",
+            connectionState: signerAvailable ? "connecting" : "local_preview",
+            statusMessage: signerAvailable
+              ? "Resolving LiveKit access for this room."
+              : "Signer required for LiveKit media. Room intent stays local."
           });
-        }
+
+          if (!signerAvailable) {
+            return;
+          }
+
+          try {
+            const tokenResponse = await requestLiveKitToken(payload.room_id);
+            applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+              transport: "livekit",
+              connectionState: "connecting",
+              statusMessage: "Connecting to LiveKit room.",
+              identity: tokenResponse.token.identity,
+              liveKitURL: tokenResponse.token.livekit_url,
+              expiresAt: tokenResponse.token.expires_at,
+              canPublish: tokenResponse.token.grants.can_publish,
+              canSubscribe: tokenResponse.token.grants.can_subscribe
+            });
+
+            const session = await connectLiveKitSession({
+              url: tokenResponse.token.livekit_url,
+              token: tokenResponse.token.token,
+              onParticipantsChanged: (participants) => {
+                if (requestID !== activeCallRequestRef.current) {
+                  return;
+                }
+                syncLiveKitParticipants(payload.room_id, geohash, participants);
+              },
+              onConnectionStatus: (status, message) => {
+                if (requestID !== activeCallRequestRef.current) {
+                  return;
+                }
+
+                setActiveCall((current) =>
+                  current && current.roomID === payload.room_id
+                    ? {
+                        ...current,
+                        transport: status === "connected" ? "livekit" : current.transport,
+                        connectionState:
+                          status === "connected"
+                            ? "connected"
+                            : status === "reconnecting"
+                              ? "connecting"
+                              : status === "disconnected"
+                                ? "failed"
+                                : "connecting",
+                        statusMessage: message
+                      }
+                    : current
+                );
+              }
+            });
+
+            if (requestID !== activeCallRequestRef.current) {
+              session.disconnect();
+              return;
+            }
+
+            liveKitSessionRef.current = session;
+            session.setDeafenEnabled(currentUser.deafen);
+
+            try {
+              if (tokenResponse.token.grants.can_publish) {
+                if (currentUser.mic) {
+                  await session.setMicrophoneEnabled(true);
+                }
+                if (currentUser.cam) {
+                  await session.setCameraEnabled(true);
+                }
+              }
+            } catch (mediaError) {
+              showToast(
+                mediaError instanceof Error
+                  ? mediaError.message
+                  : "Connected to room, but media device setup failed.",
+                "error"
+              );
+            }
+          } catch (error) {
+            disconnectLiveKitSession();
+            const message =
+              error instanceof MediaAuthError
+                ? error.message
+                : error instanceof Error
+                  ? error.message
+                  : "Media temporarily unavailable.";
+
+            applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+              transport: "local",
+              connectionState: "failed",
+              statusMessage: message
+            });
+            showToast(message, "info");
+          }
+        });
       },
       leavePlaceCall: () => {
+        activeCallRequestRef.current += 1;
+        disconnectLiveKitSession();
         setActiveCall(null);
       },
       toggleCallControl: (control) => {
-        setActiveCall((current) =>
-          current
-            ? {
-                ...current,
-                [control]: !current[control]
-              }
-            : current
-        );
+        const session = liveKitSessionRef.current;
+
+        setActiveCall((current) => {
+          if (!current) {
+            return current;
+          }
+
+          const nextValue = !current[control];
+          if (current.transport === "livekit" && session) {
+            if (control === "deafen") {
+              session.setDeafenEnabled(nextValue);
+            } else {
+              const setter =
+                control === "mic"
+                  ? session.setMicrophoneEnabled
+                  : control === "cam"
+                    ? session.setCameraEnabled
+                    : session.setScreenShareEnabled;
+
+              void setter(nextValue).catch((error: unknown) => {
+                setActiveCall((latest) =>
+                  latest
+                    ? {
+                        ...latest,
+                        [control]: !nextValue
+                      }
+                    : latest
+                );
+                showToast(error instanceof Error ? error.message : "Media control failed.", "error");
+              });
+            }
+          }
+
+          return {
+            ...current,
+            [control]: nextValue
+          };
+        });
       },
       toggleCallMinimized: () => {
         setActiveCall((current) =>
@@ -284,6 +548,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       effectivePlaces,
       effectiveProfiles,
       noteMap,
+      placeMediaState,
       placeMap,
       profileMap,
       relayOperatorPubkey,

@@ -37,9 +37,9 @@ docker compose up --build
 
 ## Implementation Status
 
-The repository now includes the Phase 1 foundation, Phase 2 social layer, and Phase 3 governance surface:
+The repository now includes the Phase 1 foundation, Phase 2 social layer, Phase 3 governance surface, and the Phase 4 media surface:
 
-- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, a global geohash-scoped call overlay, and authenticated governance workflows for guest list, blocklist, standing, room permissions, and audit review
+- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, rooms-on-map, a global geohash-scoped LiveKit call overlay, Blossom-backed place media uploads, and authenticated governance workflows for guest list, blocklist, standing, room permissions, and audit review
 - `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging with cursor pagination, LiveKit token vending, a `strfry` policy shim, and public social/bootstrap and admin governance endpoints for the web app
 - `db/migrations`: initial Postgres schema for policy, standing, sessions, and audit
 - `runbooks`: operator runbooks from the roadmap
