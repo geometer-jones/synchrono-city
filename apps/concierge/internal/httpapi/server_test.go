@@ -609,6 +609,113 @@ func TestInternalRelayAuthorizeReturnsProtocolContract(t *testing.T) {
 	}
 }
 
+func TestInternalRelayAuthorizeReturnsRequiredProofContract(t *testing.T) {
+	policyStore := store.NewMemory()
+	_, err := policyStore.CreateGatePolicy(t.Context(), store.GatePolicy{
+		Capability:      "relay.publish",
+		Scope:           "relay",
+		ProofTypes:      []string{"oauth"},
+		GrantedByPubkey: "operator",
+	})
+	if err != nil {
+		t.Fatalf("seed gate policy: %v", err)
+	}
+
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "operator",
+	}, policyStore)
+
+	payload := []byte(`{
+	  "action":"publish",
+	  "scope":"relay",
+	  "pubkey":"proofless-pubkey",
+	  "event":{"id":"event-2","kind":1,"created_at":1773356400,"tags":[["p","peer"]]}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/internal/relay/authorize", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		Allow  bool   `json:"allow"`
+		Reason string `json:"reason"`
+		Policy struct {
+			Publish struct {
+				Mode                string `json:"mode"`
+				ProofRequirement    string `json:"proof_requirement"`
+				ProofRequirementMet bool   `json:"proof_requirement_met"`
+				Gates               []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"gates"`
+			} `json:"publish"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Allow || response.Reason != "required_proof" {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+	if response.Policy.Publish.Mode != "gated" {
+		t.Fatalf("expected gated mode, got %+v", response.Policy.Publish)
+	}
+	if response.Policy.Publish.ProofRequirement != "oauth" || response.Policy.Publish.ProofRequirementMet {
+		t.Fatalf("unexpected proof requirement: %+v", response.Policy.Publish)
+	}
+	if len(response.Policy.Publish.Gates) != 1 || response.Policy.Publish.Gates[0].Type != "oauth" || response.Policy.Publish.Gates[0].Status != "missing" {
+		t.Fatalf("unexpected gates: %+v", response.Policy.Publish.Gates)
+	}
+}
+
+func TestSocialBootstrapAppliesEditorialPinFromStore(t *testing.T) {
+	policyStore := store.NewMemory()
+	_, err := policyStore.CreateEditorialPin(t.Context(), store.EditorialPin{
+		Geohash:         "9q8yym",
+		NoteID:          "note-annex-move",
+		Label:           "featured",
+		GrantedByPubkey: "operator",
+	})
+	if err != nil {
+		t.Fatalf("seed editorial pin: %v", err)
+	}
+
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "operator",
+	}, policyStore)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		Places []struct {
+			Geohash      string `json:"geohash"`
+			PinnedNoteID string `json:"pinned_note_id"`
+		} `json:"places"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	for _, place := range response.Places {
+		if place.Geohash == "9q8yym" && place.PinnedNoteID == "note-annex-move" {
+			return
+		}
+	}
+	t.Fatalf("expected editorial pin to be applied: %+v", response.Places)
+}
+
 var (
 	operatorSK string
 	guestSK    string

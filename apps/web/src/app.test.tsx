@@ -216,6 +216,15 @@ describe("app shell", () => {
     expect(await screen.findByRole("heading", { name: /mika hart/i })).toBeInTheDocument();
   });
 
+  it("renders phase 5 synthesis and editorial sections in pulse", () => {
+    renderRouter("/app/pulse");
+
+    expect(screen.getByRole("heading", { name: /ai synthesis/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /operator pins/i })).toBeInTheDocument();
+    expect(screen.getByText(/tenant organizing thread with a pinned logistics note and a live room\./i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /cite aurora vale/i })).toBeInTheDocument();
+  });
+
   it("renders the settings route", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({
@@ -235,7 +244,7 @@ describe("app shell", () => {
     expect(screen.getByText(/roles and standing management/i)).toBeInTheDocument();
   });
 
-  it("connects a nostr signer and runs phase 3 governance workflows", async () => {
+  it("connects a nostr signer and runs phase 5 governance workflows", async () => {
     window.nostr = {
       getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
       signEvent: vi.fn().mockImplementation(async (event) => ({
@@ -251,6 +260,9 @@ describe("app shell", () => {
     const blockEntries: Array<Record<string, unknown>> = [];
     const standingEntries: Array<Record<string, unknown>> = [];
     const roomEntries: Array<Record<string, unknown>> = [];
+    const proofEntries: Array<Record<string, unknown>> = [];
+    const gateEntries: Array<Record<string, unknown>> = [];
+    const pinEntries: Array<Record<string, unknown>> = [];
     const auditEntries: Array<Record<string, unknown>> = [
       {
         id: 7,
@@ -397,6 +409,107 @@ describe("app shell", () => {
         return jsonResponse(record, 201);
       }
 
+      if (url.pathname === "/api/v1/admin/proofs" && init?.method === "GET") {
+        return jsonResponse({ entries: proofEntries });
+      }
+
+      if (url.pathname === "/api/v1/admin/proofs" && init?.method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          subject_pubkey: string;
+          proof_type: string;
+          proof_value: string;
+          revoked: boolean;
+        };
+        const record = {
+          id: nextID++,
+          subject_pubkey: body.subject_pubkey,
+          proof_type: body.proof_type,
+          proof_value: body.proof_value,
+          granted_by_pubkey: "npub1operator",
+          revoked: body.revoked,
+          created_at: "2026-03-18T18:31:00Z"
+        };
+        proofEntries.unshift(record);
+        auditEntries.unshift({
+          id: nextID++,
+          actor_pubkey: "npub1operator",
+          action: "proof.verification.created",
+          target_pubkey: body.subject_pubkey,
+          scope: body.proof_type,
+          metadata: { proof_type: body.proof_type },
+          created_at: "2026-03-18T18:31:00Z"
+        });
+        return jsonResponse(record, 201);
+      }
+
+      if (url.pathname === "/api/v1/admin/gates" && init?.method === "GET") {
+        return jsonResponse({ entries: gateEntries });
+      }
+
+      if (url.pathname === "/api/v1/admin/gates" && init?.method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          capability: string;
+          scope: string;
+          require_guest: boolean;
+          proof_types: string[];
+          revoked: boolean;
+        };
+        const record = {
+          id: nextID++,
+          capability: body.capability,
+          scope: body.scope,
+          require_guest: body.require_guest,
+          proof_types: body.proof_types,
+          granted_by_pubkey: "npub1operator",
+          revoked: body.revoked,
+          created_at: "2026-03-18T18:31:00Z"
+        };
+        gateEntries.unshift(record);
+        auditEntries.unshift({
+          id: nextID++,
+          actor_pubkey: "npub1operator",
+          action: "gate.policy.created",
+          target_pubkey: "",
+          scope: body.capability,
+          metadata: { proof_types: body.proof_types.join(",") },
+          created_at: "2026-03-18T18:31:00Z"
+        });
+        return jsonResponse(record, 201);
+      }
+
+      if (url.pathname === "/api/v1/admin/editorial/pins" && init?.method === "GET") {
+        return jsonResponse({ entries: pinEntries });
+      }
+
+      if (url.pathname === "/api/v1/admin/editorial/pins" && init?.method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          geohash: string;
+          note_id: string;
+          label: string;
+          revoked: boolean;
+        };
+        const record = {
+          id: nextID++,
+          geohash: body.geohash,
+          note_id: body.note_id,
+          label: body.label,
+          granted_by_pubkey: "npub1operator",
+          revoked: body.revoked,
+          created_at: "2026-03-18T18:31:00Z"
+        };
+        pinEntries.unshift(record);
+        auditEntries.unshift({
+          id: nextID++,
+          actor_pubkey: "npub1operator",
+          action: "editorial.pin.created",
+          target_pubkey: "",
+          scope: body.geohash,
+          metadata: { note_id: body.note_id },
+          created_at: "2026-03-18T18:31:00Z"
+        });
+        return jsonResponse(record, 201);
+      }
+
       if (url.pathname === "/api/v1/admin/audit") {
         return jsonResponse({
           entries: auditEntries,
@@ -450,10 +563,39 @@ describe("app shell", () => {
     await user.click(within(roomCard).getByRole("button", { name: /save room permission/i }));
     expect(await screen.findByText(/room permission saved for npub1room on geo:npub1operator:9q8yyk\./i)).toBeInTheDocument();
 
+    const proofCard = screen.getByRole("heading", { name: /verify oauth and social proofs/i }).closest("article");
+    if (!proofCard) {
+      throw new Error("proof card missing");
+    }
+    await user.type(within(proofCard).getByLabelText(/subject pubkey/i), "npub1proof");
+    await user.type(within(proofCard).getByLabelText(/proof value/i), "github:proof");
+    await user.click(within(proofCard).getByRole("button", { name: /verify proof/i }));
+    expect(await screen.findByText(/proof oauth verified for npub1proof\./i)).toBeInTheDocument();
+
+    const gateCard = screen.getByRole("heading", { name: /require proofs before publish/i }).closest("article");
+    if (!gateCard) {
+      throw new Error("gate card missing");
+    }
+    await user.click(within(gateCard).getByLabelText(/require guest allowlist/i));
+    await user.click(within(gateCard).getByLabelText(/require oauth proof/i));
+    await user.click(within(gateCard).getByRole("button", { name: /save gate policy/i }));
+    expect(await screen.findByText(/gate policy saved for relay\.publish\./i)).toBeInTheDocument();
+
+    const pinCard = screen.getByRole("heading", { name: /pin relay notes into pulse/i }).closest("article");
+    if (!pinCard) {
+      throw new Error("pin card missing");
+    }
+    await user.type(within(pinCard).getByLabelText(/^geohash$/i), "9q8yyk");
+    await user.type(within(pinCard).getByLabelText(/note id/i), "note-plaza-pinned");
+    await user.click(within(pinCard).getByRole("button", { name: /^pin note$/i }));
+    expect(await screen.findByText(/editorial pin saved for 9q8yyk -> note-plaza-pinned\./i)).toBeInTheDocument();
+
     expect((await screen.findAllByText(/standing\.record\.created/i)).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(/npub1guest/i)).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(/npub1blocked/i)).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(/npub1room/i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/npub1proof/i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/note-plaza-pinned/i)).length).toBeGreaterThan(0);
     expect(fetchMock).toHaveBeenCalled();
   });
 

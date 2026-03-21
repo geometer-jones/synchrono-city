@@ -6,23 +6,38 @@ import {
   assignStanding,
   blockPubkey,
   connectAdminSigner,
+  fetchEditorialPins,
+  fetchGatePolicies,
   fetchAuditLog,
   fetchBlocklist,
   fetchGuestList,
+  fetchProofVerifications,
   fetchRoomPermissions,
   fetchStanding,
   grantRoomPermission,
+  pinEditorialNote,
+  revokeProof,
   removeFromGuestList,
+  saveGatePolicy,
   unblockPubkey,
+  unpinEditorialNote,
   revokeRoomPermission,
   revokeStanding,
+  verifyProof,
   type AdminAccessDecision,
   type AuditEntry,
+  type EditorialPin,
+  type GateCapabilityValue,
+  type GatePolicy,
   type Paginated,
   type PolicyAssignment,
+  type ProofTypeValue,
+  type ProofVerification,
   type RoomPermission,
   type StandingRecord,
   type StandingValue,
+  validGateCapabilities,
+  validProofTypes,
   validStandings
 } from "../admin-client";
 import { ApiError, apiFetch } from "../api";
@@ -33,6 +48,8 @@ const adminCapabilities = [
   "Roles and standing management",
   "Guest list and blocklist control",
   "Room-level permissions",
+  "Proof verification and gate stacking",
+  "Relay feed pinning and editorial controls",
   "Privileged audit history"
 ] as const;
 
@@ -50,9 +67,11 @@ type AdminSession = {
 };
 
 const defaultStanding = "member";
+const defaultProofType = "oauth";
+const defaultGateCapability = "relay.publish";
 
 export function SettingsRoute() {
-  const { activeCall, currentUser, listThreads, places, relayOperatorPubkey, sceneHealth } = useAppState();
+  const { activeCall, currentUser, listThreads, places, relayOperatorPubkey, refreshSocialBootstrap, sceneHealth } = useAppState();
   const [health, setHealth] = useState<RelayHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
@@ -63,6 +82,9 @@ export function SettingsRoute() {
   const [blockEntries, setBlockEntries] = useState<PolicyAssignment[]>([]);
   const [standingEntries, setStandingEntries] = useState<StandingRecord[]>([]);
   const [roomEntries, setRoomEntries] = useState<RoomPermission[]>([]);
+  const [proofEntries, setProofEntries] = useState<ProofVerification[]>([]);
+  const [gateEntries, setGateEntries] = useState<GatePolicy[]>([]);
+  const [pinEntries, setPinEntries] = useState<EditorialPin[]>([]);
   const [auditPage, setAuditPage] = useState<Paginated<AuditEntry>>({ entries: [] });
 
   const [isConnecting, setIsConnecting] = useState(false);
@@ -71,6 +93,9 @@ export function SettingsRoute() {
   const [isSavingBlock, setIsSavingBlock] = useState(false);
   const [isSavingStanding, setIsSavingStanding] = useState(false);
   const [isSavingRoom, setIsSavingRoom] = useState(false);
+  const [isSavingProof, setIsSavingProof] = useState(false);
+  const [isSavingGate, setIsSavingGate] = useState(false);
+  const [isSavingPin, setIsSavingPin] = useState(false);
   const [isLoadingAuditMore, setIsLoadingAuditMore] = useState(false);
 
   const [guestPubkey, setGuestPubkey] = useState("");
@@ -88,6 +113,17 @@ export function SettingsRoute() {
   const [roomCanPublish, setRoomCanPublish] = useState(false);
   const [roomCanSubscribe, setRoomCanSubscribe] = useState(true);
   const [roomLookupID, setRoomLookupID] = useState("");
+  const [proofPubkey, setProofPubkey] = useState("");
+  const [proofType, setProofType] = useState<ProofTypeValue>(defaultProofType);
+  const [proofValue, setProofValue] = useState("");
+  const [gateCapability, setGateCapability] = useState<GateCapabilityValue>(defaultGateCapability);
+  const [gateScope, setGateScope] = useState("relay");
+  const [gateRequireGuest, setGateRequireGuest] = useState(false);
+  const [gateRequireOAuth, setGateRequireOAuth] = useState(false);
+  const [gateRequireSocial, setGateRequireSocial] = useState(false);
+  const [pinGeohash, setPinGeohash] = useState("");
+  const [pinNoteID, setPinNoteID] = useState("");
+  const [pinLabel, setPinLabel] = useState("featured");
 
   const refreshGenerationRef = useRef(0);
 
@@ -143,11 +179,14 @@ export function SettingsRoute() {
     const generation = ++refreshGenerationRef.current;
     setIsRefreshing(true);
     try {
-      const [guestList, blocklist, standings, roomPermissions, audit] = await Promise.all([
+      const [guestList, blocklist, standings, roomPermissions, proofs, gates, pins, audit] = await Promise.all([
         fetchGuestList(),
         fetchBlocklist(),
         fetchStanding(standingLookupPubkey || undefined),
         fetchRoomPermissions({ roomID: roomLookupID || undefined, limit: 20 }),
+        fetchProofVerifications({ limit: 20 }),
+        fetchGatePolicies({ limit: 20 }),
+        fetchEditorialPins({ limit: 20 }),
         fetchAuditLog(undefined, 20)
       ]);
 
@@ -160,6 +199,9 @@ export function SettingsRoute() {
       setBlockEntries(blocklist);
       setStandingEntries(standings);
       setRoomEntries(roomPermissions);
+      setProofEntries(proofs);
+      setGateEntries(gates);
+      setPinEntries(pins);
       setAuditPage(audit);
       setAdminError(null);
     } catch (error) {
@@ -317,6 +359,69 @@ export function SettingsRoute() {
     }
   }
 
+  async function handleProofAction(action: "verify" | "revoke") {
+    setIsSavingProof(true);
+    try {
+      const record = action === "verify"
+        ? await verifyProof(proofPubkey, proofType, proofValue)
+        : await revokeProof(proofPubkey, proofType, proofValue);
+      setLastMutation(`Proof ${record.proof_type} ${record.revoked ? "revoked" : "verified"} for ${record.subject_pubkey}.`);
+      showToast(action === "verify" ? "Proof verified." : "Proof revoked.", "info");
+      setProofPubkey("");
+      setProofValue("");
+      await refreshGovernanceData();
+    } catch (error) {
+      setAdminError(formatAdminError(error));
+    } finally {
+      setIsSavingProof(false);
+    }
+  }
+
+  async function handleGatePolicyAction(action: "save" | "revoke") {
+    setIsSavingGate(true);
+    try {
+      const proofTypes: ProofTypeValue[] = [];
+      if (gateRequireOAuth) {
+        proofTypes.push("oauth");
+      }
+      if (gateRequireSocial) {
+        proofTypes.push("social");
+      }
+
+      const record = await saveGatePolicy({
+        capability: gateCapability,
+        scope: gateScope,
+        requireGuest: gateRequireGuest,
+        proofTypes,
+        revoked: action === "revoke"
+      });
+      setLastMutation(`Gate policy ${record.revoked ? "revoked" : "saved"} for ${record.capability}.`);
+      showToast(action === "save" ? "Gate policy saved." : "Gate policy revoked.", "info");
+      await refreshGovernanceData();
+    } catch (error) {
+      setAdminError(formatAdminError(error));
+    } finally {
+      setIsSavingGate(false);
+    }
+  }
+
+  async function handleEditorialPinAction(action: "pin" | "unpin") {
+    setIsSavingPin(true);
+    try {
+      const record = action === "pin"
+        ? await pinEditorialNote(pinGeohash, pinNoteID, pinLabel)
+        : await unpinEditorialNote(pinGeohash, pinNoteID, pinLabel);
+      setLastMutation(`Editorial pin ${record.revoked ? "revoked" : "saved"} for ${record.geohash} -> ${record.note_id}.`);
+      showToast(action === "pin" ? "Editorial pin saved." : "Editorial pin revoked.", "info");
+      await refreshGovernanceData();
+      await refreshSocialBootstrap();
+    } catch (error) {
+      setAdminError(formatAdminError(error));
+    } finally {
+      setIsSavingPin(false);
+    }
+  }
+
   return (
     <section className="panel route-surface route-surface-settings">
       <p className="section-label">Settings</p>
@@ -324,7 +429,7 @@ export function SettingsRoute() {
         <div>
           <h2>Relay Governance</h2>
           <p className="muted route-header-copy">
-            Phase 3 operator controls for roles, policy, room access, and privileged audit review.
+            Phase 5 operator controls for roles, proofs, gates, editorial pins, and privileged audit review.
           </p>
         </div>
         <span className={health?.status === "ok" ? "status-pill status-pill-live" : "status-pill"}>
@@ -430,7 +535,7 @@ export function SettingsRoute() {
       <div className="feature-grid">
         <article className="feature-card">
           <p className="section-label">Governance surface</p>
-          <h3>Phase 3 controls</h3>
+          <h3>Phase 5 controls</h3>
           <ul className="capability-list">
             {adminCapabilities.map((capability) => (
               <li key={capability}>{capability}</li>
@@ -734,6 +839,252 @@ export function SettingsRoute() {
             ))}
           </div>
         </form>
+      </div>
+
+      <div className="admin-grid">
+        <article className="feature-card admin-form">
+          <p className="section-label">Proof verification</p>
+          <h3>Verify OAuth and social proofs</h3>
+          <label className="field-stack">
+            <span>Subject pubkey</span>
+            <input
+              className="field-input"
+              value={proofPubkey}
+              onChange={(event) => setProofPubkey(event.target.value)}
+              placeholder="npub1... or 64-char hex"
+              disabled={!canAdmin || isSavingProof}
+            />
+          </label>
+          <label className="field-stack">
+            <span>Proof type</span>
+            <select
+              className="field-input"
+              value={proofType}
+              onChange={(event) => setProofType(event.target.value as ProofTypeValue)}
+              disabled={!canAdmin || isSavingProof}
+            >
+              {validProofTypes.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-stack">
+            <span>Proof value</span>
+            <input
+              className="field-input"
+              value={proofValue}
+              onChange={(event) => setProofValue(event.target.value)}
+              placeholder="github:operator or nostr:trusted-graph"
+              disabled={!canAdmin || isSavingProof}
+            />
+          </label>
+          <div className="action-row">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void handleProofAction("verify")}
+              disabled={!canAdmin || isSavingProof}
+            >
+              {isSavingProof ? "Saving..." : "Verify proof"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleProofAction("revoke")}
+              disabled={!canAdmin || isSavingProof}
+            >
+              Revoke proof
+            </button>
+          </div>
+          <div className="admin-record-list">
+            {proofEntries.length === 0 ? <p className="muted">No proof verifications recorded.</p> : null}
+            {proofEntries.map((entry) => (
+              <article key={`proof-${entry.id ?? entry.created_at}`} className="mini-card admin-record">
+                <strong>{entry.subject_pubkey}</strong>
+                <p>{entry.proof_type} · {entry.proof_value}</p>
+                <small>{entry.revoked ? "Revoked" : "Verified"} · {entry.created_at ?? "Timestamp unavailable"}</small>
+              </article>
+            ))}
+          </div>
+        </article>
+
+        <article className="feature-card admin-form">
+          <p className="section-label">Gate stacking</p>
+          <h3>Require proofs before publish</h3>
+          <label className="field-stack">
+            <span>Capability</span>
+            <select
+              className="field-input"
+              value={gateCapability}
+              onChange={(event) => setGateCapability(event.target.value as GateCapabilityValue)}
+              disabled={!canAdmin || isSavingGate}
+            >
+              {validGateCapabilities.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field-stack">
+            <span>Scope</span>
+            <input
+              className="field-input"
+              value={gateScope}
+              onChange={(event) => setGateScope(event.target.value)}
+              placeholder="relay"
+              disabled={!canAdmin || isSavingGate}
+            />
+          </label>
+          <div className="checkbox-grid">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={gateRequireGuest}
+                onChange={(event) => setGateRequireGuest(event.target.checked)}
+                disabled={!canAdmin || isSavingGate}
+              />
+              <span>Require guest allowlist</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={gateRequireOAuth}
+                onChange={(event) => setGateRequireOAuth(event.target.checked)}
+                disabled={!canAdmin || isSavingGate}
+              />
+              <span>Require OAuth proof</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={gateRequireSocial}
+                onChange={(event) => setGateRequireSocial(event.target.checked)}
+                disabled={!canAdmin || isSavingGate}
+              />
+              <span>Require social proof</span>
+            </label>
+          </div>
+          <div className="action-row">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void handleGatePolicyAction("save")}
+              disabled={!canAdmin || isSavingGate}
+            >
+              {isSavingGate ? "Saving..." : "Save gate policy"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleGatePolicyAction("revoke")}
+              disabled={!canAdmin || isSavingGate}
+            >
+              Revoke policy
+            </button>
+          </div>
+          <div className="admin-record-list">
+            {gateEntries.length === 0 ? <p className="muted">No gate policies recorded.</p> : null}
+            {gateEntries.map((entry) => (
+              <article key={`gate-${entry.id ?? entry.created_at}`} className="mini-card admin-record">
+                <strong>{entry.capability}</strong>
+                <p>
+                  {entry.scope} · guest {flag(entry.require_guest)} · proofs {entry.proof_types.join(", ") || "none"}
+                </p>
+                <small>{entry.revoked ? "Revoked" : "Active"} · {entry.created_at ?? "Timestamp unavailable"}</small>
+              </article>
+            ))}
+          </div>
+        </article>
+      </div>
+
+      <div className="admin-grid">
+        <article className="feature-card admin-form">
+          <p className="section-label">Editorial pins</p>
+          <h3>Pin relay notes into Pulse</h3>
+          <label className="field-stack">
+            <span>Geohash</span>
+            <input
+              className="field-input"
+              value={pinGeohash}
+              onChange={(event) => setPinGeohash(event.target.value)}
+              placeholder="9q8yyk"
+              disabled={!canAdmin || isSavingPin}
+            />
+          </label>
+          <label className="field-stack">
+            <span>Note ID</span>
+            <input
+              className="field-input"
+              value={pinNoteID}
+              onChange={(event) => setPinNoteID(event.target.value)}
+              placeholder="note-plaza-pinned"
+              disabled={!canAdmin || isSavingPin}
+            />
+          </label>
+          <label className="field-stack">
+            <span>Label</span>
+            <input
+              className="field-input"
+              value={pinLabel}
+              onChange={(event) => setPinLabel(event.target.value)}
+              placeholder="featured"
+              disabled={!canAdmin || isSavingPin}
+            />
+          </label>
+          <div className="action-row">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void handleEditorialPinAction("pin")}
+              disabled={!canAdmin || isSavingPin}
+            >
+              {isSavingPin ? "Saving..." : "Pin note"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleEditorialPinAction("unpin")}
+              disabled={!canAdmin || isSavingPin}
+            >
+              Unpin note
+            </button>
+          </div>
+          <div className="admin-record-list">
+            {pinEntries.length === 0 ? <p className="muted">No editorial pins recorded.</p> : null}
+            {pinEntries.map((entry) => (
+              <article key={`pin-${entry.id ?? entry.created_at}`} className="mini-card admin-record">
+                <strong>{entry.geohash}</strong>
+                <p>{entry.note_id} · {entry.label}</p>
+                <small>{entry.revoked ? "Revoked" : "Pinned"} · {entry.created_at ?? "Timestamp unavailable"}</small>
+              </article>
+            ))}
+          </div>
+        </article>
+
+        <article className="feature-card">
+          <p className="section-label">Phase 5 summary</p>
+          <h3>Intelligence surface</h3>
+          <dl className="metric-list">
+            <div>
+              <dt>Verified proofs</dt>
+              <dd>{proofEntries.filter((entry) => !entry.revoked).length}</dd>
+            </div>
+            <div>
+              <dt>Active gate policies</dt>
+              <dd>{gateEntries.filter((entry) => !entry.revoked).length}</dd>
+            </div>
+            <div>
+              <dt>Active editorial pins</dt>
+              <dd>{pinEntries.filter((entry) => !entry.revoked).length}</dd>
+            </div>
+          </dl>
+          <p className="muted">
+            Proofs and gate policies feed Concierge relay authorization. Editorial pins are reflected in Pulse after refresh.
+          </p>
+        </article>
       </div>
 
       <section className="feature-card">

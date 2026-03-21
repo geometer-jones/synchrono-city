@@ -81,6 +81,48 @@ function decodeGeohashCenter(geohash: string): [number, number] | null {
   return [(longitude[0] + longitude[1]) / 2, (latitude[0] + latitude[1]) / 2];
 }
 
+function encodeGeohash(longitude: number, latitude: number, precision = 6) {
+  let geohash = "";
+  let bit = 0;
+  let characterValue = 0;
+  let evenBit = true;
+  const latRange = [-90, 90];
+  const lngRange = [-180, 180];
+
+  while (geohash.length < precision) {
+    if (evenBit) {
+      const midpoint = (lngRange[0] + lngRange[1]) / 2;
+      if (longitude >= midpoint) {
+        characterValue = (characterValue << 1) + 1;
+        lngRange[0] = midpoint;
+      } else {
+        characterValue <<= 1;
+        lngRange[1] = midpoint;
+      }
+    } else {
+      const midpoint = (latRange[0] + latRange[1]) / 2;
+      if (latitude >= midpoint) {
+        characterValue = (characterValue << 1) + 1;
+        latRange[0] = midpoint;
+      } else {
+        characterValue <<= 1;
+        latRange[1] = midpoint;
+      }
+    }
+
+    evenBit = !evenBit;
+    bit += 1;
+
+    if (bit === 5) {
+      geohash += geohashBase32[characterValue];
+      bit = 0;
+      characterValue = 0;
+    }
+  }
+
+  return geohash;
+}
+
 function buildFeatureCollection(
   tiles: PlaceTile[],
   selectedGeohash?: string,
@@ -324,6 +366,18 @@ export function MapPreview({
           });
         };
 
+        const handleBackgroundClick = (event: mapboxgl.MapMouseEvent) => {
+          const features = map.queryRenderedFeatures(event.point, {
+            layers: [clusterCircleLayerID, clusterCountLayerID, pointCircleLayerID, pointCountLayerID]
+          });
+          if (features.length > 0) {
+            return;
+          }
+
+          const geohash = encodeGeohash(event.lngLat.lng, event.lngLat.lat, 6);
+          onSelectTile?.(geohash);
+        };
+
         const setPointerCursor = () => {
           map.getCanvas().style.cursor = "pointer";
         };
@@ -346,6 +400,7 @@ export function MapPreview({
           map.on("click", pointCountLayerID, handlePointSelect);
           map.on("click", clusterCircleLayerID, handleClusterSelect);
           map.on("click", clusterCountLayerID, handleClusterSelect);
+          map.on("click", handleBackgroundClick);
           map.on("mouseenter", pointCircleLayerID, setPointerCursor);
           map.on("mouseleave", pointCircleLayerID, resetPointerCursor);
           map.on("mouseenter", pointCountLayerID, setPointerCursor);

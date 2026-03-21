@@ -89,6 +89,7 @@ Acceptance criteria:
 
 - entering `/app` shows a full-screen map below the app bar
 - the map is pannable and zoomable
+- clicking bare map background relocates presence to the clicked `geohash6`
 - the map remains visible while interacting with place details
 - the page no longer reads as a dashboard of stacked cards
 
@@ -119,6 +120,7 @@ Acceptance criteria:
 - the selected marker state is visually obvious
 - the user does not need to press a second Join button for marker-based place selection
 - marker numbers continue to represent note count only
+- cluster click zooms in without relocating presence
 
 ### 4. Marker detail overlay/card
 

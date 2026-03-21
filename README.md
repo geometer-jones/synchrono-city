@@ -37,10 +37,10 @@ docker compose up --build
 
 ## Implementation Status
 
-The repository now includes the Phase 1 foundation, Phase 2 social layer, Phase 3 governance surface, and the Phase 4 media surface:
+The repository now includes the Phase 1 foundation, Phase 2 social layer, Phase 3 governance surface, Phase 4 media surface, and the Phase 5 intelligence surface:
 
-- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, rooms-on-map, a global geohash-scoped LiveKit call overlay, Blossom-backed place media uploads, and authenticated governance workflows for guest list, blocklist, standing, room permissions, and audit review
-- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization, audit logging with cursor pagination, LiveKit token vending, a `strfry` policy shim, and public social/bootstrap and admin governance endpoints for the web app
+- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, AI synthesis cards with citations, rooms-on-map, a global geohash-scoped LiveKit call overlay, Blossom-backed place media uploads, and authenticated governance workflows for guest list, blocklist, standing, proof verification, gate stacking, editorial pinning, room permissions, and audit review
+- `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization with gate stacking and proof checks, audit logging with cursor pagination, LiveKit token vending, a `strfry` policy shim, and public social/bootstrap and admin governance endpoints for the web app
 - `db/migrations`: initial Postgres schema for policy, standing, sessions, and audit
 - `runbooks`: operator runbooks from the roadmap
 - `apps/concierge/relay-strfry.conf.example`: sample `strfry` write-policy plugin wiring for the relay shim

@@ -57,6 +57,16 @@ export type FeedSegment = {
   description: string;
 };
 
+export type RelaySynthesis = {
+  id: string;
+  geohash: string;
+  placeTitle: string;
+  summary: string;
+  generatedAt: string;
+  sourceNoteIds: string[];
+  participantPubkeys: string[];
+};
+
 export type PlaceTile = {
   geohash: string;
   title: string;
@@ -273,12 +283,68 @@ export function resolveRoomID(geohash: string, operatorPubkey = relayOperatorPub
   return `geo:${operatorPubkey}:${geohash}`;
 }
 
+export function createEphemeralPlace(geohash: string): Place {
+  return {
+    geohash,
+    title: `Field tile ${geohash}`,
+    neighborhood: "Ad hoc presence",
+    description: "No operator-defined place exists for this tile yet.",
+    activitySummary: "Presence was set directly from a map click.",
+    tags: ["ad-hoc", "geohash6"],
+    capacity: 8,
+    occupantPubkeys: [],
+    unread: false
+  };
+}
+
 export function sortNotesByRecency(notes: GeoNote[]) {
   return [...notes].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 export function listNotesForPlace(notes: GeoNote[], geohash: string) {
   return sortNotesByRecency(notes.filter((note) => note.geohash === geohash));
+}
+
+function ensureSentence(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+export function buildRelaySyntheses(places: Place[], notes: GeoNote[]): RelaySynthesis[] {
+  return places
+    .map((place) => {
+      const placeNotes = listNotesForPlace(notes, place.geohash);
+      const activitySignals = placeNotes.length + place.occupantPubkeys.length;
+
+      if (placeNotes.length === 0 || activitySignals < 3) {
+        return null;
+      }
+
+      const citedNotes = placeNotes.slice(0, 2);
+      const summaryParts = [ensureSentence(place.activitySummary)];
+
+      if (citedNotes[0]) {
+        summaryParts.push(`Latest note: ${ensureSentence(citedNotes[0].content)}`);
+      }
+      if (citedNotes[1]) {
+        summaryParts.push(`Also tracking: ${ensureSentence(citedNotes[1].content)}`);
+      }
+
+      return {
+        id: `synthesis-${place.geohash}`,
+        geohash: place.geohash,
+        placeTitle: place.title,
+        summary: summaryParts.filter(Boolean).join(" "),
+        generatedAt: citedNotes[0].createdAt,
+        sourceNoteIds: citedNotes.map((note) => note.id),
+        participantPubkeys: [...place.occupantPubkeys]
+      } satisfies RelaySynthesis;
+    })
+    .filter((entry): entry is RelaySynthesis => Boolean(entry))
+    .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
 }
 
 export function buildParticipantMap(profiles: ParticipantProfile[]) {
@@ -319,6 +385,11 @@ export function buildThreads(
   currentPubkey: string,
   operatorPubkey = relayOperatorPubkey
 ) {
+  const effectivePlaces =
+    activeCall && !places.some((place) => place.geohash === activeCall.geohash)
+      ? [createEphemeralPlace(activeCall.geohash), ...places]
+      : places;
+
   // Pre-group notes by geohash to avoid O(n*m) filtering per place
   const notesByGeohash = new Map<string, GeoNote[]>();
   for (const note of notes) {
@@ -327,7 +398,7 @@ export function buildThreads(
     notesByGeohash.set(note.geohash, existing);
   }
 
-  return places.map((place) => {
+  return effectivePlaces.map((place) => {
     const placeNotes = notesByGeohash.get(place.geohash) ?? [];
     const sortedPlaceNotes = sortNotesByRecency(placeNotes);
     return {
@@ -351,6 +422,11 @@ export function buildPlaceTiles(
   currentPubkey: string,
   operatorPubkey = relayOperatorPubkey
 ) {
+  const effectivePlaces =
+    activeCall && !places.some((place) => place.geohash === activeCall.geohash)
+      ? [createEphemeralPlace(activeCall.geohash), ...places]
+      : places;
+
   // Pre-group notes by geohash to avoid O(n*m) filtering per place
   const notesByGeohash = new Map<string, GeoNote[]>();
   for (const note of notes) {
@@ -359,7 +435,7 @@ export function buildPlaceTiles(
     notesByGeohash.set(note.geohash, existing);
   }
 
-  return places.map((place) => {
+  return effectivePlaces.map((place) => {
     const placeNotes = notesByGeohash.get(place.geohash) ?? [];
     const sortedPlaceNotes = sortNotesByRecency(placeNotes);
     return {

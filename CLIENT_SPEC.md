@@ -180,6 +180,18 @@ Marker contract:
 - Marker-driven detail must preserve a fast path into the exact geohash conversation after presence has been set.
 - Marker placement must stay anchored to the map as the user pans or zooms.
 
+Map click contract:
+
+- Clicking the map background relocates the user's presence to the nearest `geohash6` for that click.
+- A background map click should immediately join the room for that clicked geohash.
+- The join path should use the default relay's LiveKit room/token flow when that is available.
+- A background map click is distinct from clicking a marker or cluster.
+
+Marker click contract:
+
+- Clicking a numbered marker relocates the user's presence to that marker's exact geohash tile.
+- Marker click should immediately join the room for that marker geohash.
+
 Marker card contract:
 
 - The marker detail surface represents exactly one geohash tile unless clustering is active.
@@ -194,6 +206,7 @@ Clustering contract:
 - Dense areas may cluster adjacent tiles for readability.
 - Cluster counts should sum note counts across included tiles.
 - Cluster behavior should respond to zoom level and dissolve as the user zooms in.
+- Clicking a cluster should zoom in toward the clustered tiles and should not relocate user presence.
 - Cluster expansion must preserve per-tile call state.
 - Cluster detail should keep underlying tiles legible rather than flattening them into one synthetic place.
 

@@ -8,21 +8,21 @@ import (
 
 func TestNewService(t *testing.T) {
 	t.Run("uses provided operator pubkey", func(t *testing.T) {
-		svc := NewService("npub1custom")
+		svc := NewService("npub1custom", nil)
 		if svc.operatorPubkey != "npub1custom" {
 			t.Errorf("expected operatorPubkey npub1custom, got %s", svc.operatorPubkey)
 		}
 	})
 
 	t.Run("falls back to default operator pubkey when empty", func(t *testing.T) {
-		svc := NewService("")
+		svc := NewService("", nil)
 		if svc.operatorPubkey != fallbackOperatorPubkey {
 			t.Errorf("expected fallback operator pubkey, got %s", svc.operatorPubkey)
 		}
 	})
 
 	t.Run("falls back to default operator pubkey when whitespace", func(t *testing.T) {
-		svc := NewService("   ")
+		svc := NewService("   ", nil)
 		if svc.operatorPubkey != fallbackOperatorPubkey {
 			t.Errorf("expected fallback operator pubkey, got %s", svc.operatorPubkey)
 		}
@@ -30,7 +30,7 @@ func TestNewService(t *testing.T) {
 }
 
 func TestBootstrap(t *testing.T) {
-	svc := NewService("npub1test")
+	svc := NewService("npub1test", nil)
 	resp := svc.Bootstrap()
 
 	t.Run("returns operator pubkey", func(t *testing.T) {

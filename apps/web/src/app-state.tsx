@@ -11,12 +11,14 @@ import {
 
 import { apiFetch } from "./api";
 import {
+  buildRelaySyntheses,
   buildNoteMap,
   buildParticipantMap,
   buildPlaceMap,
   buildPlaceTiles,
   buildStoryExport,
   buildThreads,
+  createEphemeralPlace,
   currentUserPubkey,
   feedSegments,
   getSceneHealthStats,
@@ -28,9 +30,11 @@ import {
   seedPlaces,
   seedProfiles,
   type CallSession,
+  type FeedSegment,
   type GeoNote,
   type ParticipantProfile,
-  type Place
+  type Place,
+  type RelaySynthesis
 } from "./data";
 import { connectLiveKitSession, type LiveKitParticipantState, type LiveKitSession } from "./livekit-session";
 import { hasNostrSigner, MediaAuthError, requestLiveKitToken, uploadBlossomFile } from "./media-client";
@@ -40,6 +44,7 @@ type CallControl = "mic" | "cam" | "screenshare" | "deafen";
 
 type BootstrapPayload = {
   relay_operator_pubkey: string;
+  feed_segments?: FeedSegment[];
   places: Place[];
   profiles: ParticipantProfile[];
   notes: GeoNote[];
@@ -67,7 +72,8 @@ type PlaceMediaAsset = {
 type AppStateValue = {
   currentUser: ParticipantProfile;
   relayOperatorPubkey: string;
-  feedSegments: typeof feedSegments;
+  feedSegments: FeedSegment[];
+  relaySyntheses: RelaySynthesis[];
   places: Place[];
   profiles: ParticipantProfile[];
   notes: GeoNote[];
@@ -84,6 +90,7 @@ type AppStateValue = {
   listNotesByAuthor: (pubkey: string) => GeoNote[];
   buildStoryExport: () => string;
   sceneHealth: ReturnType<typeof getSceneHealthStats>;
+  refreshSocialBootstrap: () => Promise<void>;
   createPlaceNote: (geohash: string, content: string) => GeoNote | null;
   uploadPlaceMedia: (geohash: string, file: File, signal?: AbortSignal) => Promise<PlaceMediaAsset | null>;
   joinPlaceCall: (geohash: string) => void;
@@ -100,6 +107,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const [placesState, setPlacesState] = useState(seedPlaces);
   const [profilesState, setProfilesState] = useState(seedProfiles);
   const [notesState, setNotesState] = useState(seedNotes);
+  const [feedSegmentsState, setFeedSegmentsState] = useState(feedSegments);
   const [placeMediaState, setPlaceMediaState] = useState<PlaceMediaAsset[]>([]);
   const activeCallRequestRef = useRef(0);
   const liveKitSessionRef = useRef<LiveKitSession | null>(null);
@@ -119,6 +127,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
 
         startTransition(() => {
           setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
           setPlacesState(payload.places);
           setProfilesState(payload.profiles);
           setNotesState(payload.notes);
@@ -143,10 +152,12 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const effectivePlaces = placesState.length > 0 ? placesState : seedPlaces;
   const effectiveProfiles = profilesState.length > 0 ? profilesState : seedProfiles;
   const effectiveNotes = notesState.length > 0 ? notesState : seedNotes;
+  const effectiveFeedSegments = feedSegmentsState.length > 0 ? feedSegmentsState : feedSegments;
 
   const placeMap = useMemo(() => buildPlaceMap(effectivePlaces), [effectivePlaces]);
   const profileMap = useMemo(() => buildParticipantMap(effectiveProfiles), [effectiveProfiles]);
   const noteMap = useMemo(() => buildNoteMap(effectiveNotes), [effectiveNotes]);
+  const relaySyntheses = useMemo(() => buildRelaySyntheses(effectivePlaces, effectiveNotes), [effectivePlaces, effectiveNotes]);
 
   const currentUser = profileMap.get(currentUserPubkey) ?? effectiveProfiles[0];
   const sceneHealth = useMemo(
@@ -185,7 +196,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     () => ({
       currentUser,
       relayOperatorPubkey,
-      feedSegments,
+      feedSegments: effectiveFeedSegments,
+      relaySyntheses,
       places: effectivePlaces,
       profiles: effectiveProfiles,
       notes: effectiveNotes,
@@ -194,15 +206,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         placeMediaState
           .filter((asset) => asset.geohash === geohash)
           .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt)),
-      getPlace: (geohash) => placeMap.get(geohash),
+      getPlace: (geohash) =>
+        placeMap.get(geohash) ??
+        (activeCall?.geohash === geohash ? createEphemeralPlace(geohash) : undefined),
       getProfile: (pubkey) => profileMap.get(pubkey),
       getNote: (noteID) => noteMap.get(noteID),
       getPlaceParticipants: (geohash) => {
         const place = placeMap.get(geohash);
-        if (!place) {
-          return [];
-        }
-
         const thread = buildThreads(
           effectivePlaces,
           effectiveNotes,
@@ -212,6 +222,9 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         ).find(
           (entry) => entry.geohash === geohash
         );
+        if (!place && !thread) {
+          return [];
+        }
         return (thread?.participants ?? [])
           .map((pubkey) => profileMap.get(pubkey))
           .filter((profile): profile is ParticipantProfile => Boolean(profile));
@@ -233,6 +246,20 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           relayOperatorPubkey
         ),
       sceneHealth,
+      refreshSocialBootstrap: async () => {
+        if (import.meta.env.MODE === "test") {
+          return;
+        }
+
+        const payload = await apiFetch<BootstrapPayload>("/api/v1/social/bootstrap");
+        startTransition(() => {
+          setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
+          setPlacesState(payload.places);
+          setProfilesState(payload.profiles);
+          setNotesState(payload.notes);
+        });
+      },
       createPlaceNote: (geohash, content) => {
         const trimmed = content.trim();
         if (!trimmed) {
@@ -292,10 +319,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         return nextAsset;
       },
       joinPlaceCall: (geohash) => {
-        const place = placeMap.get(geohash);
-        if (!place) {
-          return;
-        }
+        const place = placeMap.get(geohash) ?? createEphemeralPlace(geohash);
 
         disconnectLiveKitSession();
 
@@ -544,6 +568,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     [
       activeCall,
       currentUser,
+      effectiveFeedSegments,
       effectiveNotes,
       effectivePlaces,
       effectiveProfiles,
@@ -552,6 +577,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       placeMap,
       profileMap,
       relayOperatorPubkey,
+      relaySyntheses,
       sceneHealth
     ]
   );

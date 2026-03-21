@@ -42,7 +42,7 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 		tokenService:  scLiveKit.NewTokenService(cfg, policyStore),
 		policyService: policy.NewService(policyStore, cfg.PrimaryOperatorPub),
 		relayAuth:     relayauth.NewEvaluator(policy.NewService(policyStore, cfg.PrimaryOperatorPub)),
-		socialService: social.NewService(cfg.PrimaryOperatorPub),
+		socialService: social.NewService(cfg.PrimaryOperatorPub, policyStore),
 		adminLimiter:  newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
 	}
 
@@ -64,6 +64,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/admin/policies", s.handleAdminPolicies)
 	s.mux.HandleFunc("/api/v1/admin/standing", s.handleAdminStanding)
 	s.mux.HandleFunc("/api/v1/admin/room-permissions", s.handleAdminRoomPermissions)
+	s.mux.HandleFunc("/api/v1/admin/proofs", s.handleAdminProofs)
+	s.mux.HandleFunc("/api/v1/admin/gates", s.handleAdminGates)
+	s.mux.HandleFunc("/api/v1/admin/editorial/pins", s.handleAdminEditorialPins)
 	s.mux.HandleFunc("/api/v1/admin/audit", s.handleAdminAudit)
 	s.mux.HandleFunc("/api/v1/relay/authorize", s.handleRelayAuthorize)
 	s.mux.HandleFunc("/internal/relay/authorize", s.handleInternalRelayAuthorize)
@@ -426,6 +429,225 @@ func (s *Server) handleAdminRoomPermissions(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, record)
 }
 
+func (s *Server) handleAdminProofs(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminProofsList(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	actorPubkey, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var request struct {
+		SubjectPubkey string            `json:"subject_pubkey"`
+		ProofType     string            `json:"proof_type"`
+		ProofValue    string            `json:"proof_value"`
+		Revoked       bool              `json:"revoked"`
+		Metadata      map[string]string `json:"metadata"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	subjectPubkey, err := validatePubkey(request.SubjectPubkey)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	proofType, err := validateProofType(request.ProofType)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	proofValue := strings.TrimSpace(request.ProofValue)
+	if proofValue == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": "proof_value is required"})
+		return
+	}
+
+	record, err := s.store.CreateProofVerification(r.Context(), store.ProofVerification{
+		SubjectPubkey:   subjectPubkey,
+		ProofType:       proofType,
+		ProofValue:      proofValue,
+		GrantedByPubkey: actorPubkey,
+		Revoked:         request.Revoked,
+		Metadata:        request.Metadata,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	_, auditErr := s.store.CreateAuditEntry(r.Context(), store.AuditEntry{
+		ActorPubkey:  actorPubkey,
+		Action:       "proof.verification.created",
+		TargetPubkey: subjectPubkey,
+		Scope:        proofType,
+		Metadata: map[string]string{
+			"proof_type":  proofType,
+			"proof_value": proofValue,
+			"revoked":     strconv.FormatBool(request.Revoked),
+		},
+	})
+	s.logAuditFailure(auditErr)
+
+	writeJSON(w, http.StatusCreated, record)
+}
+
+func (s *Server) handleAdminGates(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminGatesList(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	actorPubkey, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var request struct {
+		Capability   string            `json:"capability"`
+		Scope        string            `json:"scope"`
+		RequireGuest bool              `json:"require_guest"`
+		ProofTypes   []string          `json:"proof_types"`
+		Revoked      bool              `json:"revoked"`
+		Metadata     map[string]string `json:"metadata"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	capability, err := validateCapability(request.Capability)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	proofTypes := make([]string, 0, len(request.ProofTypes))
+	seenProofTypes := map[string]struct{}{}
+	for _, proofType := range request.ProofTypes {
+		validated, err := validateProofType(proofType)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return
+		}
+		if _, exists := seenProofTypes[validated]; exists {
+			continue
+		}
+		seenProofTypes[validated] = struct{}{}
+		proofTypes = append(proofTypes, validated)
+	}
+
+	record, err := s.store.CreateGatePolicy(r.Context(), store.GatePolicy{
+		Capability:      capability,
+		Scope:           strings.TrimSpace(request.Scope),
+		RequireGuest:    request.RequireGuest,
+		ProofTypes:      proofTypes,
+		GrantedByPubkey: actorPubkey,
+		Revoked:         request.Revoked,
+		Metadata:        request.Metadata,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	_, auditErr := s.store.CreateAuditEntry(r.Context(), store.AuditEntry{
+		ActorPubkey: actorPubkey,
+		Action:      "gate.policy.created",
+		Scope:       capability,
+		Metadata: map[string]string{
+			"require_guest": strconv.FormatBool(request.RequireGuest),
+			"proof_types":   strings.Join(proofTypes, ","),
+			"revoked":       strconv.FormatBool(request.Revoked),
+		},
+	})
+	s.logAuditFailure(auditErr)
+
+	writeJSON(w, http.StatusCreated, record)
+}
+
+func (s *Server) handleAdminEditorialPins(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		s.handleAdminEditorialPinsList(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	actorPubkey, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+
+	var request struct {
+		Geohash  string            `json:"geohash"`
+		NoteID   string            `json:"note_id"`
+		Label    string            `json:"label"`
+		Revoked  bool              `json:"revoked"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	geohash, err := validateGeohash(request.Geohash)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	noteID, err := validateNoteID(request.NoteID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	if err := s.socialService.ValidateEditorialPin(geohash, noteID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	record, err := s.store.CreateEditorialPin(r.Context(), store.EditorialPin{
+		Geohash:         geohash,
+		NoteID:          noteID,
+		Label:           validateLabel(request.Label),
+		GrantedByPubkey: actorPubkey,
+		Revoked:         request.Revoked,
+		Metadata:        request.Metadata,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	_, auditErr := s.store.CreateAuditEntry(r.Context(), store.AuditEntry{
+		ActorPubkey: actorPubkey,
+		Action:      "editorial.pin.created",
+		Scope:       geohash,
+		Metadata: map[string]string{
+			"note_id": noteID,
+			"label":   record.Label,
+			"revoked": strconv.FormatBool(request.Revoked),
+		},
+	})
+	s.logAuditFailure(auditErr)
+
+	writeJSON(w, http.StatusCreated, record)
+}
+
 func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
@@ -509,6 +731,63 @@ func (s *Server) handleAdminRoomPermissionsList(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
 }
 
+func (s *Server) handleAdminProofsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parseProofVerificationQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListProofVerifications(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
+func (s *Server) handleAdminGatesList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parseGatePolicyQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListGatePolicies(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
+func (s *Server) handleAdminEditorialPinsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	query, ok := parseEditorialPinQuery(w, r)
+	if !ok {
+		return
+	}
+
+	records, err := s.store.ListEditorialPins(r.Context(), query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
 func (s *Server) handleRelayAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
@@ -524,6 +803,12 @@ func (s *Server) handleRelayAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
 		return
 	}
+	capability, err := validateCapability(request.Capability)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	request.Capability = capability
 
 	decision := s.policyService.Evaluate(r.Context(), request.SubjectPubkey, request.Capability, request.RoomID)
 	if decision.Decision != "allow" {
@@ -699,6 +984,86 @@ func parseRoomPermissionQuery(w http.ResponseWriter, r *http.Request) (store.Roo
 			return store.RoomPermissionQuery{}, false
 		}
 		query.SubjectPubkey = validated
+	}
+	return query, true
+}
+
+func parseProofVerificationQuery(w http.ResponseWriter, r *http.Request) (store.ProofVerificationQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.ProofVerificationQuery{}, false
+	}
+
+	query := store.ProofVerificationQuery{
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+	if subject := strings.TrimSpace(r.URL.Query().Get("subject_pubkey")); subject != "" {
+		validated, err := validatePubkey(subject)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.ProofVerificationQuery{}, false
+		}
+		query.SubjectPubkey = validated
+	}
+	if proofType := strings.TrimSpace(r.URL.Query().Get("proof_type")); proofType != "" {
+		validated, err := validateProofType(proofType)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.ProofVerificationQuery{}, false
+		}
+		query.ProofType = validated
+	}
+	return query, true
+}
+
+func parseGatePolicyQuery(w http.ResponseWriter, r *http.Request) (store.GatePolicyQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.GatePolicyQuery{}, false
+	}
+
+	query := store.GatePolicyQuery{
+		Scope:          strings.TrimSpace(r.URL.Query().Get("scope")),
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+	if capability := strings.TrimSpace(r.URL.Query().Get("capability")); capability != "" {
+		validated, err := validateCapability(capability)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.GatePolicyQuery{}, false
+		}
+		query.Capability = validated
+	}
+	return query, true
+}
+
+func parseEditorialPinQuery(w http.ResponseWriter, r *http.Request) (store.EditorialPinQuery, bool) {
+	limit, ok := parseOptionalLimit(w, r)
+	if !ok {
+		return store.EditorialPinQuery{}, false
+	}
+
+	query := store.EditorialPinQuery{
+		IncludeRevoked: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true"),
+		Limit:          limit,
+	}
+	if geohash := strings.TrimSpace(r.URL.Query().Get("geohash")); geohash != "" {
+		validated, err := validateGeohash(geohash)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.EditorialPinQuery{}, false
+		}
+		query.Geohash = validated
+	}
+	if noteID := strings.TrimSpace(r.URL.Query().Get("note_id")); noteID != "" {
+		validated, err := validateNoteID(noteID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return store.EditorialPinQuery{}, false
+		}
+		query.NoteID = validated
 	}
 	return query, true
 }

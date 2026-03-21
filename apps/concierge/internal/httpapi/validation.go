@@ -25,6 +25,15 @@ var (
 		"allow_media":   {},
 		"guest":         {},
 	}
+	validProofTypes = map[string]struct{}{
+		"oauth":  {},
+		"social": {},
+	}
+	validCapabilities = map[string]struct{}{
+		"relay.publish": {},
+		"media.join":    {},
+		"media.publish": {},
+	}
 )
 
 func validatePubkey(pubkey string) (string, error) {
@@ -60,4 +69,44 @@ func validateRoomID(roomID string) (string, error) {
 		return "", errors.New("room_id is required")
 	}
 	return roomID, nil
+}
+
+func validateProofType(proofType string) (string, error) {
+	proofType = strings.TrimSpace(strings.ToLower(proofType))
+	if _, ok := validProofTypes[proofType]; !ok {
+		return "", fmt.Errorf("invalid proof_type %q", proofType)
+	}
+	return proofType, nil
+}
+
+func validateCapability(capability string) (string, error) {
+	capability = strings.TrimSpace(capability)
+	if _, ok := validCapabilities[capability]; !ok {
+		return "", fmt.Errorf("invalid capability %q", capability)
+	}
+	return capability, nil
+}
+
+func validateNoteID(noteID string) (string, error) {
+	noteID = strings.TrimSpace(noteID)
+	if noteID == "" {
+		return "", errors.New("note_id is required")
+	}
+	return noteID, nil
+}
+
+func validateGeohash(geohash string) (string, error) {
+	geohash = strings.TrimSpace(strings.ToLower(geohash))
+	if geohash == "" {
+		return "", errors.New("geohash is required")
+	}
+	return geohash, nil
+}
+
+func validateLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "featured"
+	}
+	return label
 }

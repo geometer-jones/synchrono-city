@@ -80,10 +80,10 @@ Related docs:
 **Duration:** 4-6 weeks
 
 **Deliverables:**
-- [ ] Proof verification (OAuth, social)
-- [ ] Gate stacking
-- [ ] AI synthesis
-- [ ] Relay feed pinning and editorial controls
+- [x] Proof verification (OAuth, social)
+- [x] Gate stacking
+- [x] AI synthesis
+- [x] Relay feed pinning and editorial controls
 
 ---
 

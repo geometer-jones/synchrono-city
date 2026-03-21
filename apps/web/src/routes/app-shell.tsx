@@ -28,7 +28,7 @@ function AppShellLayout() {
           <p className="eyebrow">Synchrono City</p>
           <strong>Map-native coordination for sovereign communities.</strong>
           <p className="muted app-bar-copy">
-            World stays map-first. Governance and media stay inside the same shell.
+            World stays map-first. Governance, media, and intelligence stay inside the same shell.
           </p>
         </div>
         <nav className="app-nav app-nav-desktop" aria-label="Primary">
@@ -44,7 +44,7 @@ function AppShellLayout() {
           ))}
         </nav>
         <div className="app-bar-status">
-          <span className="status-pill status-pill-live">Roadmap: Phase 4</span>
+          <span className="status-pill status-pill-live">Roadmap: Phase 5</span>
           <span className="status-pill">{sceneHealth.activeTiles} live tiles</span>
           <span className="status-pill">{sceneHealth.openSeats} open seats</span>
           <span className={activeCall ? "status-pill status-pill-live" : "status-pill"}>

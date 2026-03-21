@@ -1,12 +1,15 @@
 package social
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
 var ErrUnknownPlace = errors.New("unknown place")
@@ -78,6 +81,7 @@ type CallIntent struct {
 
 type Service struct {
 	mu                sync.RWMutex
+	store             store.Store
 	operatorPubkey    string
 	currentUserPubkey string
 	places            []Place
@@ -88,7 +92,7 @@ type Service struct {
 	now               func() time.Time
 }
 
-func NewService(operatorPubkey string) *Service {
+func NewService(operatorPubkey string, socialStore store.Store) *Service {
 	if strings.TrimSpace(operatorPubkey) == "" {
 		operatorPubkey = fallbackOperatorPubkey
 	}
@@ -96,6 +100,7 @@ func NewService(operatorPubkey string) *Service {
 	// Seed data below is the authoritative source.
 	// Keep in sync with apps/web/src/data.ts fallback seed data.
 	return &Service{
+		store:             socialStore,
 		operatorPubkey:    operatorPubkey,
 		currentUserPubkey: DefaultCurrentUserPubkey,
 		places: []Place{
@@ -283,10 +288,17 @@ func (s *Service) Bootstrap() BootstrapResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	places := slices.Clone(s.places)
+	if s.store != nil {
+		if pins, err := s.store.ListEditorialPins(context.Background(), store.EditorialPinQuery{Limit: 64}); err == nil {
+			applyEditorialPins(places, pins, s.notes)
+		}
+	}
+
 	return BootstrapResponse{
 		RelayOperatorPubkey: s.operatorPubkey,
 		CurrentUserPubkey:   s.currentUserPubkey,
-		Places:              slices.Clone(s.places),
+		Places:              places,
 		Profiles:            slices.Clone(s.profiles),
 		Notes:               slices.Clone(s.notes),
 		FeedSegments:        slices.Clone(s.feedSegments),
@@ -351,6 +363,23 @@ func (s *Service) ResolveCallIntent(geohash, pubkey string) (CallIntent, error) 
 	}, nil
 }
 
+func (s *Service) ValidateEditorialPin(geohash, noteID string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, ok := s.placeByGeohashLocked(geohash); !ok {
+		return ErrUnknownPlace
+	}
+
+	for _, note := range s.notes {
+		if note.ID == noteID && note.Geohash == geohash {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("note %s does not belong to %s", noteID, geohash)
+}
+
 func ResolveRoomID(operatorPubkey, geohash string) string {
 	return fmt.Sprintf("geo:%s:%s", operatorPubkey, geohash)
 }
@@ -367,4 +396,35 @@ func (s *Service) placeByGeohashLocked(geohash string) (Place, bool) {
 		}
 	}
 	return Place{}, false
+}
+
+func applyEditorialPins(places []Place, pins []store.EditorialPin, notes []Note) {
+	if len(pins) == 0 {
+		return
+	}
+
+	noteMap := make(map[string]Note, len(notes))
+	for _, note := range notes {
+		noteMap[note.ID] = note
+	}
+
+	activePins := make(map[string]store.EditorialPin, len(pins))
+	for _, pin := range pins {
+		if pin.Revoked {
+			continue
+		}
+		note, ok := noteMap[pin.NoteID]
+		if !ok || note.Geohash != pin.Geohash {
+			continue
+		}
+		if _, exists := activePins[pin.Geohash]; !exists {
+			activePins[pin.Geohash] = pin
+		}
+	}
+
+	for index := range places {
+		if pin, ok := activePins[places[index].Geohash]; ok {
+			places[index].PinnedNoteID = pin.NoteID
+		}
+	}
 }

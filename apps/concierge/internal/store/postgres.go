@@ -115,6 +115,87 @@ func (s *PostgresStore) CreateRoomPermission(ctx context.Context, permission Roo
 	return permission, nil
 }
 
+func (s *PostgresStore) CreateProofVerification(ctx context.Context, record ProofVerification) (ProofVerification, error) {
+	metadataBytes, err := json.Marshal(record.Metadata)
+	if err != nil {
+		return ProofVerification{}, err
+	}
+
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO proof_verifications (subject_pubkey, proof_type, proof_value, granted_by_pubkey, revoked, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		record.SubjectPubkey,
+		record.ProofType,
+		record.ProofValue,
+		record.GrantedByPubkey,
+		record.Revoked,
+		metadataBytes,
+	)
+
+	if err := row.Scan(&record.ID, &record.CreatedAt); err != nil {
+		return ProofVerification{}, err
+	}
+	return record, nil
+}
+
+func (s *PostgresStore) CreateGatePolicy(ctx context.Context, policy GatePolicy) (GatePolicy, error) {
+	proofTypeBytes, err := json.Marshal(policy.ProofTypes)
+	if err != nil {
+		return GatePolicy{}, err
+	}
+	metadataBytes, err := json.Marshal(policy.Metadata)
+	if err != nil {
+		return GatePolicy{}, err
+	}
+
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO gate_policies (capability, scope, require_guest, proof_types, granted_by_pubkey, revoked, metadata)
+		 VALUES ($1, COALESCE(NULLIF($2, ''), 'relay'), $3, $4, $5, $6, $7)
+		 RETURNING id, created_at`,
+		policy.Capability,
+		policy.Scope,
+		policy.RequireGuest,
+		proofTypeBytes,
+		policy.GrantedByPubkey,
+		policy.Revoked,
+		metadataBytes,
+	)
+
+	policy.Scope = DefaultScope(policy.Scope)
+	if err := row.Scan(&policy.ID, &policy.CreatedAt); err != nil {
+		return GatePolicy{}, err
+	}
+	return policy, nil
+}
+
+func (s *PostgresStore) CreateEditorialPin(ctx context.Context, pin EditorialPin) (EditorialPin, error) {
+	metadataBytes, err := json.Marshal(pin.Metadata)
+	if err != nil {
+		return EditorialPin{}, err
+	}
+
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO editorial_pins (geohash, note_id, label, granted_by_pubkey, revoked, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		pin.Geohash,
+		pin.NoteID,
+		pin.Label,
+		pin.GrantedByPubkey,
+		pin.Revoked,
+		metadataBytes,
+	)
+
+	if err := row.Scan(&pin.ID, &pin.CreatedAt); err != nil {
+		return EditorialPin{}, err
+	}
+	return pin, nil
+}
+
 func (s *PostgresStore) ListPolicyAssignments(ctx context.Context, query PolicyAssignmentQuery) ([]PolicyAssignment, error) {
 	args := []any{}
 	clauses := []string{}
@@ -160,6 +241,60 @@ func (s *PostgresStore) ListPolicyAssignments(ctx context.Context, query PolicyA
 			&record.SubjectPubkey,
 			&record.PolicyType,
 			&record.Scope,
+			&record.GrantedByPubkey,
+			&record.Revoked,
+			&metadataBytes,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.Metadata = decodeMetadata(metadataBytes)
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *PostgresStore) ListProofVerifications(ctx context.Context, query ProofVerificationQuery) ([]ProofVerification, error) {
+	args := []any{}
+	clauses := []string{}
+
+	if query.SubjectPubkey != "" {
+		args = append(args, query.SubjectPubkey)
+		clauses = append(clauses, fmt.Sprintf("subject_pubkey = $%d", len(args)))
+	}
+	if query.ProofType != "" {
+		args = append(args, query.ProofType)
+		clauses = append(clauses, fmt.Sprintf("proof_type = $%d", len(args)))
+	}
+	if !query.IncludeRevoked {
+		clauses = append(clauses, "revoked = FALSE")
+	}
+
+	statement := strings.Builder{}
+	statement.WriteString(`SELECT id, subject_pubkey, proof_type, proof_value, granted_by_pubkey, revoked, metadata, created_at
+		 FROM proof_verifications`)
+	if len(clauses) > 0 {
+		statement.WriteString(" WHERE ")
+		statement.WriteString(strings.Join(clauses, " AND "))
+	}
+	args = append(args, clampLimit(query.Limit))
+	statement.WriteString(fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args)))
+
+	rows, err := s.db.QueryContext(ctx, statement.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := []ProofVerification{}
+	for rows.Next() {
+		var record ProofVerification
+		var metadataBytes []byte
+		if err := rows.Scan(
+			&record.ID,
+			&record.SubjectPubkey,
+			&record.ProofType,
+			&record.ProofValue,
 			&record.GrantedByPubkey,
 			&record.Revoked,
 			&metadataBytes,
@@ -224,6 +359,63 @@ func (s *PostgresStore) ListStandingRecords(ctx context.Context, query StandingR
 	return records, rows.Err()
 }
 
+func (s *PostgresStore) ListGatePolicies(ctx context.Context, query GatePolicyQuery) ([]GatePolicy, error) {
+	args := []any{}
+	clauses := []string{}
+
+	if query.Capability != "" {
+		args = append(args, query.Capability)
+		clauses = append(clauses, fmt.Sprintf("capability = $%d", len(args)))
+	}
+	if query.Scope != "" {
+		args = append(args, DefaultScope(query.Scope))
+		clauses = append(clauses, fmt.Sprintf("scope = $%d", len(args)))
+	}
+	if !query.IncludeRevoked {
+		clauses = append(clauses, "revoked = FALSE")
+	}
+
+	statement := strings.Builder{}
+	statement.WriteString(`SELECT id, capability, scope, require_guest, proof_types, granted_by_pubkey, revoked, metadata, created_at
+		 FROM gate_policies`)
+	if len(clauses) > 0 {
+		statement.WriteString(" WHERE ")
+		statement.WriteString(strings.Join(clauses, " AND "))
+	}
+	args = append(args, clampLimit(query.Limit))
+	statement.WriteString(fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args)))
+
+	rows, err := s.db.QueryContext(ctx, statement.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := []GatePolicy{}
+	for rows.Next() {
+		var record GatePolicy
+		var proofTypeBytes []byte
+		var metadataBytes []byte
+		if err := rows.Scan(
+			&record.ID,
+			&record.Capability,
+			&record.Scope,
+			&record.RequireGuest,
+			&proofTypeBytes,
+			&record.GrantedByPubkey,
+			&record.Revoked,
+			&metadataBytes,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.ProofTypes = decodeStringList(proofTypeBytes)
+		record.Metadata = decodeMetadata(metadataBytes)
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 func (s *PostgresStore) ListRoomPermissions(ctx context.Context, query RoomPermissionQuery) ([]RoomPermission, error) {
 	args := []any{}
 	clauses := []string{}
@@ -272,6 +464,60 @@ func (s *PostgresStore) ListRoomPermissions(ctx context.Context, query RoomPermi
 		); err != nil {
 			return nil, err
 		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *PostgresStore) ListEditorialPins(ctx context.Context, query EditorialPinQuery) ([]EditorialPin, error) {
+	args := []any{}
+	clauses := []string{}
+
+	if query.Geohash != "" {
+		args = append(args, query.Geohash)
+		clauses = append(clauses, fmt.Sprintf("geohash = $%d", len(args)))
+	}
+	if query.NoteID != "" {
+		args = append(args, query.NoteID)
+		clauses = append(clauses, fmt.Sprintf("note_id = $%d", len(args)))
+	}
+	if !query.IncludeRevoked {
+		clauses = append(clauses, "revoked = FALSE")
+	}
+
+	statement := strings.Builder{}
+	statement.WriteString(`SELECT id, geohash, note_id, label, granted_by_pubkey, revoked, metadata, created_at
+		 FROM editorial_pins`)
+	if len(clauses) > 0 {
+		statement.WriteString(" WHERE ")
+		statement.WriteString(strings.Join(clauses, " AND "))
+	}
+	args = append(args, clampLimit(query.Limit))
+	statement.WriteString(fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args)))
+
+	rows, err := s.db.QueryContext(ctx, statement.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	records := []EditorialPin{}
+	for rows.Next() {
+		var record EditorialPin
+		var metadataBytes []byte
+		if err := rows.Scan(
+			&record.ID,
+			&record.Geohash,
+			&record.NoteID,
+			&record.Label,
+			&record.GrantedByPubkey,
+			&record.Revoked,
+			&metadataBytes,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.Metadata = decodeMetadata(metadataBytes)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -416,6 +662,75 @@ func (s *PostgresStore) LatestRoomPermission(ctx context.Context, subjectPubkey,
 	return permission, nil
 }
 
+func (s *PostgresStore) LatestProofVerification(ctx context.Context, subjectPubkey, proofType string) (ProofVerification, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, subject_pubkey, proof_type, proof_value, granted_by_pubkey, revoked, metadata, created_at
+		 FROM proof_verifications
+		 WHERE subject_pubkey = $1 AND proof_type = $2 AND revoked = FALSE
+		 ORDER BY created_at DESC
+		 LIMIT 1`,
+		subjectPubkey,
+		proofType,
+	)
+
+	var record ProofVerification
+	var metadataBytes []byte
+	if err := row.Scan(
+		&record.ID,
+		&record.SubjectPubkey,
+		&record.ProofType,
+		&record.ProofValue,
+		&record.GrantedByPubkey,
+		&record.Revoked,
+		&metadataBytes,
+		&record.CreatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProofVerification{}, ErrNotFound
+		}
+		return ProofVerification{}, err
+	}
+	record.Metadata = decodeMetadata(metadataBytes)
+	return record, nil
+}
+
+func (s *PostgresStore) LatestGatePolicy(ctx context.Context, capability, scope string) (GatePolicy, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, capability, scope, require_guest, proof_types, granted_by_pubkey, revoked, metadata, created_at
+		 FROM gate_policies
+		 WHERE capability = $1 AND revoked = FALSE AND (scope = $2 OR scope = 'relay')
+		 ORDER BY CASE WHEN scope = $2 THEN 0 ELSE 1 END, created_at DESC
+		 LIMIT 1`,
+		capability,
+		DefaultScope(scope),
+	)
+
+	var policy GatePolicy
+	var proofTypeBytes []byte
+	var metadataBytes []byte
+	if err := row.Scan(
+		&policy.ID,
+		&policy.Capability,
+		&policy.Scope,
+		&policy.RequireGuest,
+		&proofTypeBytes,
+		&policy.GrantedByPubkey,
+		&policy.Revoked,
+		&metadataBytes,
+		&policy.CreatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GatePolicy{}, ErrNotFound
+		}
+		return GatePolicy{}, err
+	}
+	policy.ProofTypes = decodeStringList(proofTypeBytes)
+	policy.Metadata = decodeMetadata(metadataBytes)
+	return policy, nil
+}
+
 func (s *PostgresStore) ActivePolicyAssignments(ctx context.Context, subjectPubkey, scope string) ([]PolicyAssignment, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
@@ -488,4 +803,15 @@ func decodeMetadata(raw []byte) map[string]string {
 		return nil
 	}
 	return metadata
+}
+
+func decodeStringList(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	return values
 }

@@ -4,10 +4,14 @@ const kindHTTPAuth = 27235;
 const hexPubkeyPattern = /^[a-f0-9]{64}$/i;
 const validStandings = ["guest", "member", "trusted", "moderator", "owner", "suspended", "banned"] as const;
 const validPolicyTypes = ["block", "allow_publish", "allow_media", "guest"] as const;
+const validProofTypes = ["oauth", "social"] as const;
+const validGateCapabilities = ["relay.publish", "media.join", "media.publish"] as const;
 
 export type StandingValue = (typeof validStandings)[number];
 export type PolicyTypeValue = (typeof validPolicyTypes)[number];
 export type StandingRole = StandingValue;
+export type ProofTypeValue = (typeof validProofTypes)[number];
+export type GateCapabilityValue = (typeof validGateCapabilities)[number];
 
 export type RoomPerms = {
   canJoin: boolean;
@@ -66,6 +70,40 @@ export type AuditEntry = {
   created_at?: string;
 };
 
+export type ProofVerification = {
+  id?: number;
+  subject_pubkey: string;
+  proof_type: ProofTypeValue;
+  proof_value: string;
+  granted_by_pubkey: string;
+  revoked: boolean;
+  metadata?: Record<string, string>;
+  created_at?: string;
+};
+
+export type GatePolicy = {
+  id?: number;
+  capability: GateCapabilityValue;
+  scope: string;
+  require_guest: boolean;
+  proof_types: ProofTypeValue[];
+  granted_by_pubkey: string;
+  revoked: boolean;
+  metadata?: Record<string, string>;
+  created_at?: string;
+};
+
+export type EditorialPin = {
+  id?: number;
+  geohash: string;
+  note_id: string;
+  label: string;
+  granted_by_pubkey: string;
+  revoked: boolean;
+  metadata?: Record<string, string>;
+  created_at?: string;
+};
+
 export type Paginated<T> = {
   entries: T[];
   next_cursor?: string;
@@ -89,6 +127,27 @@ type StandingRecordFilters = {
 type RoomPermissionFilters = {
   subjectPubkey?: string;
   roomID?: string;
+  includeRevoked?: boolean;
+  limit?: number;
+};
+
+type ProofVerificationFilters = {
+  subjectPubkey?: string;
+  proofType?: ProofTypeValue;
+  includeRevoked?: boolean;
+  limit?: number;
+};
+
+type GatePolicyFilters = {
+  capability?: GateCapabilityValue;
+  scope?: string;
+  includeRevoked?: boolean;
+  limit?: number;
+};
+
+type EditorialPinFilters = {
+  geohash?: string;
+  noteID?: string;
   includeRevoked?: boolean;
   limit?: number;
 };
@@ -308,6 +367,164 @@ export async function createRoomPermission(input: {
   });
 }
 
+export async function fetchProofVerifications(filters: ProofVerificationFilters = {}): Promise<ProofVerification[]> {
+  const response = await adminFetch<{ entries: ProofVerification[] }>(
+    buildAdminPath("/api/v1/admin/proofs", {
+      subject_pubkey: filters.subjectPubkey ? validatePubkey(filters.subjectPubkey) : undefined,
+      proof_type: filters.proofType ? validateProofType(filters.proofType) : undefined,
+      include_revoked: filters.includeRevoked ? "true" : undefined,
+      limit: filters.limit ? String(filters.limit) : undefined
+    }),
+    { method: "GET" }
+  );
+  return response.entries;
+}
+
+export async function verifyProof(
+  pubkey: string,
+  proofType: ProofTypeValue,
+  proofValue: string,
+  metadata?: Record<string, string>
+): Promise<ProofVerification> {
+  return createProofVerification({
+    subjectPubkey: pubkey,
+    proofType,
+    proofValue,
+    revoked: false,
+    metadata
+  });
+}
+
+export async function revokeProof(
+  pubkey: string,
+  proofType: ProofTypeValue,
+  proofValue: string,
+  metadata?: Record<string, string>
+): Promise<ProofVerification> {
+  return createProofVerification({
+    subjectPubkey: pubkey,
+    proofType,
+    proofValue,
+    revoked: true,
+    metadata
+  });
+}
+
+export async function createProofVerification(input: {
+  subjectPubkey: string;
+  proofType: ProofTypeValue;
+  proofValue: string;
+  revoked: boolean;
+  metadata?: Record<string, string>;
+}): Promise<ProofVerification> {
+  return adminFetch<ProofVerification>("/api/v1/admin/proofs", {
+    method: "POST",
+    body: {
+      subject_pubkey: validatePubkey(input.subjectPubkey),
+      proof_type: validateProofType(input.proofType),
+      proof_value: validateProofValue(input.proofValue),
+      revoked: input.revoked,
+      metadata: input.metadata
+    }
+  });
+}
+
+export async function fetchGatePolicies(filters: GatePolicyFilters = {}): Promise<GatePolicy[]> {
+  const response = await adminFetch<{ entries: GatePolicy[] }>(
+    buildAdminPath("/api/v1/admin/gates", {
+      capability: filters.capability ? validateCapability(filters.capability) : undefined,
+      scope: filters.scope?.trim() || undefined,
+      include_revoked: filters.includeRevoked ? "true" : undefined,
+      limit: filters.limit ? String(filters.limit) : undefined
+    }),
+    { method: "GET" }
+  );
+  return response.entries;
+}
+
+export async function saveGatePolicy(input: {
+  capability: GateCapabilityValue;
+  scope?: string;
+  requireGuest: boolean;
+  proofTypes: ProofTypeValue[];
+  revoked?: boolean;
+  metadata?: Record<string, string>;
+}): Promise<GatePolicy> {
+  return adminFetch<GatePolicy>("/api/v1/admin/gates", {
+    method: "POST",
+    body: {
+      capability: validateCapability(input.capability),
+      scope: input.scope?.trim() ?? "relay",
+      require_guest: input.requireGuest,
+      proof_types: input.proofTypes.map((proofType) => validateProofType(proofType)),
+      revoked: input.revoked ?? false,
+      metadata: input.metadata
+    }
+  });
+}
+
+export async function fetchEditorialPins(filters: EditorialPinFilters = {}): Promise<EditorialPin[]> {
+  const response = await adminFetch<{ entries: EditorialPin[] }>(
+    buildAdminPath("/api/v1/admin/editorial/pins", {
+      geohash: filters.geohash ? validateGeohash(filters.geohash) : undefined,
+      note_id: filters.noteID ? validateNoteID(filters.noteID) : undefined,
+      include_revoked: filters.includeRevoked ? "true" : undefined,
+      limit: filters.limit ? String(filters.limit) : undefined
+    }),
+    { method: "GET" }
+  );
+  return response.entries;
+}
+
+export async function pinEditorialNote(
+  geohash: string,
+  noteID: string,
+  label = "featured",
+  metadata?: Record<string, string>
+): Promise<EditorialPin> {
+  return createEditorialPin({
+    geohash,
+    noteID,
+    label,
+    revoked: false,
+    metadata
+  });
+}
+
+export async function unpinEditorialNote(
+  geohash: string,
+  noteID: string,
+  label = "featured",
+  metadata?: Record<string, string>
+): Promise<EditorialPin> {
+  return createEditorialPin({
+    geohash,
+    noteID,
+    label,
+    revoked: true,
+    metadata
+  });
+}
+
+export async function createEditorialPin(input: {
+  geohash: string;
+  noteID: string;
+  label: string;
+  revoked: boolean;
+  metadata?: Record<string, string>;
+}): Promise<EditorialPin> {
+  return adminFetch<EditorialPin>("/api/v1/admin/editorial/pins", {
+    method: "POST",
+    body: {
+      geohash: validateGeohash(input.geohash),
+      note_id: validateNoteID(input.noteID),
+      label: validateLabel(input.label),
+      revoked: input.revoked,
+      metadata: input.metadata
+    }
+  });
+}
+
 export async function fetchAuditLog(cursor?: string, limit = 20): Promise<Paginated<AuditEntry>> {
   return adminFetch<Paginated<AuditEntry>>(
     buildAdminPath("/api/v1/admin/audit", {
@@ -361,7 +578,52 @@ export function validateReason(reason: string): string {
   return normalized;
 }
 
-export { validPolicyTypes, validStandings };
+export function validateProofType(proofType: string): ProofTypeValue {
+  const normalized = proofType.trim().toLowerCase();
+  if (!validProofTypes.includes(normalized as ProofTypeValue)) {
+    throw new AdminAuthError("Proof type must be oauth or social.");
+  }
+  return normalized as ProofTypeValue;
+}
+
+export function validateCapability(capability: string): GateCapabilityValue {
+  const normalized = capability.trim();
+  if (!validGateCapabilities.includes(normalized as GateCapabilityValue)) {
+    throw new AdminAuthError("Capability must be one of the supported gate targets.");
+  }
+  return normalized as GateCapabilityValue;
+}
+
+export function validateProofValue(proofValue: string): string {
+  const normalized = proofValue.trim();
+  if (!normalized) {
+    throw new AdminAuthError("Proof value is required.");
+  }
+  return normalized;
+}
+
+export function validateGeohash(geohash: string): string {
+  const normalized = geohash.trim().toLowerCase();
+  if (!normalized) {
+    throw new AdminAuthError("Geohash is required.");
+  }
+  return normalized;
+}
+
+export function validateNoteID(noteID: string): string {
+  const normalized = noteID.trim();
+  if (!normalized) {
+    throw new AdminAuthError("Note ID is required.");
+  }
+  return normalized;
+}
+
+export function validateLabel(label: string): string {
+  const normalized = label.trim();
+  return normalized || "featured";
+}
+
+export { validGateCapabilities, validPolicyTypes, validProofTypes, validStandings };
 
 async function adminFetch<T>(
   path: string,

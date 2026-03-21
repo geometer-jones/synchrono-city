@@ -43,6 +43,40 @@ type RoomPermission struct {
 	CreatedAt       time.Time `json:"created_at,omitempty"`
 }
 
+type ProofVerification struct {
+	ID              int64             `json:"id,omitempty"`
+	SubjectPubkey   string            `json:"subject_pubkey"`
+	ProofType       string            `json:"proof_type"`
+	ProofValue      string            `json:"proof_value"`
+	GrantedByPubkey string            `json:"granted_by_pubkey"`
+	Revoked         bool              `json:"revoked"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+}
+
+type GatePolicy struct {
+	ID              int64             `json:"id,omitempty"`
+	Capability      string            `json:"capability"`
+	Scope           string            `json:"scope"`
+	RequireGuest    bool              `json:"require_guest"`
+	ProofTypes      []string          `json:"proof_types,omitempty"`
+	GrantedByPubkey string            `json:"granted_by_pubkey"`
+	Revoked         bool              `json:"revoked"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+}
+
+type EditorialPin struct {
+	ID              int64             `json:"id,omitempty"`
+	Geohash         string            `json:"geohash"`
+	NoteID          string            `json:"note_id"`
+	Label           string            `json:"label"`
+	GrantedByPubkey string            `json:"granted_by_pubkey"`
+	Revoked         bool              `json:"revoked"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       time.Time         `json:"created_at,omitempty"`
+}
+
 type AuditEntry struct {
 	ID           int64             `json:"id,omitempty"`
 	ActorPubkey  string            `json:"actor_pubkey"`
@@ -75,6 +109,27 @@ type RoomPermissionQuery struct {
 	Limit          int
 }
 
+type ProofVerificationQuery struct {
+	SubjectPubkey  string
+	ProofType      string
+	IncludeRevoked bool
+	Limit          int
+}
+
+type GatePolicyQuery struct {
+	Capability     string
+	Scope          string
+	IncludeRevoked bool
+	Limit          int
+}
+
+type EditorialPinQuery struct {
+	Geohash        string
+	NoteID         string
+	IncludeRevoked bool
+	Limit          int
+}
+
 type AuditEntryQuery struct {
 	Cursor string
 	Limit  int
@@ -89,13 +144,21 @@ type Store interface {
 	CreatePolicyAssignment(context.Context, PolicyAssignment) (PolicyAssignment, error)
 	CreateStandingRecord(context.Context, StandingRecord) (StandingRecord, error)
 	CreateRoomPermission(context.Context, RoomPermission) (RoomPermission, error)
+	CreateProofVerification(context.Context, ProofVerification) (ProofVerification, error)
+	CreateGatePolicy(context.Context, GatePolicy) (GatePolicy, error)
+	CreateEditorialPin(context.Context, EditorialPin) (EditorialPin, error)
 	ListPolicyAssignments(context.Context, PolicyAssignmentQuery) ([]PolicyAssignment, error)
 	ListStandingRecords(context.Context, StandingRecordQuery) ([]StandingRecord, error)
 	ListRoomPermissions(context.Context, RoomPermissionQuery) ([]RoomPermission, error)
+	ListProofVerifications(context.Context, ProofVerificationQuery) ([]ProofVerification, error)
+	ListGatePolicies(context.Context, GatePolicyQuery) ([]GatePolicy, error)
+	ListEditorialPins(context.Context, EditorialPinQuery) ([]EditorialPin, error)
 	ListAuditEntries(context.Context, AuditEntryQuery) (AuditEntryPage, error)
 	CreateAuditEntry(context.Context, AuditEntry) (AuditEntry, error)
 	LatestStanding(context.Context, string, string) (StandingRecord, error)
 	LatestRoomPermission(context.Context, string, string) (RoomPermission, error)
+	LatestProofVerification(context.Context, string, string) (ProofVerification, error)
+	LatestGatePolicy(context.Context, string, string) (GatePolicy, error)
 	ActivePolicyAssignments(context.Context, string, string) ([]PolicyAssignment, error)
 	Close() error
 }
