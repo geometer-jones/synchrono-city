@@ -22,6 +22,8 @@ const MinGeohashLength = 1
 
 const DefaultCurrentUserPubkey = "npub1scout"
 const fallbackOperatorPubkey = "npub1operator"
+const fallbackRelayName = "Synchrono City Local"
+const fallbackRelayURL = "ws://localhost:8080"
 
 type Profile struct {
 	Pubkey      string `json:"pubkey"`
@@ -63,13 +65,30 @@ type FeedSegment struct {
 	Description string `json:"description"`
 }
 
+type CrossRelayFeedItem struct {
+	ID           string `json:"id"`
+	RelayName    string `json:"relay_name"`
+	RelayURL     string `json:"relay_url"`
+	AuthorPubkey string `json:"author_pubkey"`
+	AuthorName   string `json:"author_name"`
+	Geohash      string `json:"geohash"`
+	PlaceTitle   string `json:"place_title"`
+	Content      string `json:"content"`
+	PublishedAt  string `json:"published_at"`
+	SourceLabel  string `json:"source_label"`
+	WhyVisible   string `json:"why_visible"`
+}
+
 type BootstrapResponse struct {
-	RelayOperatorPubkey string        `json:"relay_operator_pubkey"`
-	CurrentUserPubkey   string        `json:"current_user_pubkey"`
-	Places              []Place       `json:"places"`
-	Profiles            []Profile     `json:"profiles"`
-	Notes               []Note        `json:"notes"`
-	FeedSegments        []FeedSegment `json:"feed_segments"`
+	RelayName           string               `json:"relay_name"`
+	RelayOperatorPubkey string               `json:"relay_operator_pubkey"`
+	CurrentUserPubkey   string               `json:"current_user_pubkey"`
+	RelayURL            string               `json:"relay_url"`
+	Places              []Place              `json:"places"`
+	Profiles            []Profile            `json:"profiles"`
+	Notes               []Note               `json:"notes"`
+	FeedSegments        []FeedSegment        `json:"feed_segments"`
+	CrossRelayItems     []CrossRelayFeedItem `json:"cross_relay_items"`
 }
 
 type CallIntent struct {
@@ -82,26 +101,37 @@ type CallIntent struct {
 type Service struct {
 	mu                sync.RWMutex
 	store             store.Store
+	relayName         string
 	operatorPubkey    string
+	relayURL          string
 	currentUserPubkey string
 	places            []Place
 	profiles          []Profile
 	notes             []Note
 	feedSegments      []FeedSegment
+	crossRelayItems   []CrossRelayFeedItem
 	nextNoteID        int64
 	now               func() time.Time
 }
 
-func NewService(operatorPubkey string, socialStore store.Store) *Service {
+func NewService(operatorPubkey, relayName, relayURL string, socialStore store.Store) *Service {
 	if strings.TrimSpace(operatorPubkey) == "" {
 		operatorPubkey = fallbackOperatorPubkey
+	}
+	if strings.TrimSpace(relayName) == "" {
+		relayName = fallbackRelayName
+	}
+	if strings.TrimSpace(relayURL) == "" {
+		relayURL = fallbackRelayURL
 	}
 
 	// Seed data below is the authoritative source.
 	// Keep in sync with apps/web/src/data.ts fallback seed data.
 	return &Service{
 		store:             socialStore,
+		relayName:         relayName,
 		operatorPubkey:    operatorPubkey,
+		relayURL:          relayURL,
 		currentUserPubkey: DefaultCurrentUserPubkey,
 		places: []Place{
 			{
@@ -279,6 +309,34 @@ func NewService(operatorPubkey string, socialStore store.Store) *Service {
 			{Name: "Local", Description: "Public events carried by the active relay."},
 			{Name: "For You", Description: "Concierge-produced merge across relays and follows."},
 		},
+		crossRelayItems: []CrossRelayFeedItem{
+			{
+				ID:           "cross-relay-plaza",
+				RelayName:    "Mission Mesh",
+				RelayURL:     "wss://mission-mesh.example/relay",
+				AuthorPubkey: "npub1tala",
+				AuthorName:   "Tala North",
+				Geohash:      "9q8yyk",
+				PlaceTitle:   "Civic plaza",
+				Content:      "March overflow is heading for the east stairs. Keep the plaza audio room open for late arrivals.",
+				PublishedAt:  "2026-03-18T18:12:00Z",
+				SourceLabel:  "Direct follow",
+				WhyVisible:   "Followed author on a configured relay is posting about the same public tile.",
+			},
+			{
+				ID:           "cross-relay-annex",
+				RelayName:    "Harbor Dispatch",
+				RelayURL:     "wss://harbor-dispatch.example/relay",
+				AuthorPubkey: "npub1ines",
+				AuthorName:   "Ines Park",
+				Geohash:      "9q8yym",
+				PlaceTitle:   "Warehouse annex",
+				Content:      "Venue queue is clear from the alley entrance. Remote listeners are joining the annex room from two relays.",
+				PublishedAt:  "2026-03-18T18:06:00Z",
+				SourceLabel:  "Relay list",
+				WhyVisible:   "Configured relay surfaced a matching logistics thread for an active local place.",
+			},
+		},
 		nextNoteID: 6,
 		now:        time.Now,
 	}
@@ -296,12 +354,15 @@ func (s *Service) Bootstrap() BootstrapResponse {
 	}
 
 	return BootstrapResponse{
+		RelayName:           s.relayName,
 		RelayOperatorPubkey: s.operatorPubkey,
 		CurrentUserPubkey:   s.currentUserPubkey,
+		RelayURL:            s.relayURL,
 		Places:              places,
 		Profiles:            slices.Clone(s.profiles),
 		Notes:               slices.Clone(s.notes),
 		FeedSegments:        slices.Clone(s.feedSegments),
+		CrossRelayItems:     slices.Clone(s.crossRelayItems),
 	}
 }
 

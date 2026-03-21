@@ -15,6 +15,7 @@ export function PulseRoute() {
     listNotesByAuthor,
     listRecentNotes,
     places,
+    pulseFeedItems,
     relaySyntheses
   } = useAppState();
 
@@ -26,6 +27,12 @@ export function PulseRoute() {
   const profilePlace = profile?.homeGeohash ? getPlace(profile.homeGeohash) : undefined;
   const profileParticipants = profilePlace ? getPlaceParticipants(profilePlace.geohash) : [];
   const recentNotes = listRecentNotes();
+  const mergedFeedCount = pulseFeedItems.length;
+  const visibleRelayCount = new Set(pulseFeedItems.map((item) => item.relayName)).size;
+  const laneCounts = pulseFeedItems.reduce<Record<string, number>>((counts, item) => {
+    counts[item.lane] = (counts[item.lane] ?? 0) + 1;
+    return counts;
+  }, {});
   const pinnedNotes = places
     .map((place) => {
       const pinnedNote = place.pinnedNoteId ? getNote(place.pinnedNoteId) : undefined;
@@ -47,13 +54,13 @@ export function PulseRoute() {
 
   function describeFeedLane(name: string) {
     if (name === "Following") {
-      return `${new Set(recentNotes.map((recentNote) => recentNote.authorPubkey)).size} active authors`;
+      return `${laneCounts.Following ?? 0} follow-sourced items`;
     }
     if (name === "Local") {
-      return `${recentNotes.length} relay notes in view`;
+      return `${laneCounts.Local ?? 0} active relay items`;
     }
     if (name === "For You") {
-      return `${relaySyntheses.length} synthesis briefs ready`;
+      return `${laneCounts["For You"] ?? 0} discovered relay items`;
     }
     return "Explainable feed lane";
   }
@@ -70,6 +77,7 @@ export function PulseRoute() {
         </div>
         <div className="route-header-meta">
           <span className="thread-pill">{feedSegments.length} feed lanes</span>
+          <span className="thread-pill">{mergedFeedCount} merged items</span>
           <span className="thread-pill live">{relaySyntheses.length} syntheses</span>
           <span className="thread-pill">{recentNotes.length} recent notes</span>
         </div>
@@ -211,6 +219,74 @@ export function PulseRoute() {
         </section>
       ) : null}
 
+      {pulseFeedItems.length > 0 ? (
+        <section className="pulse-section">
+          <div className="detail-header">
+            <div>
+              <p className="section-label">Phase 6</p>
+              <h3>Cross-relay merge</h3>
+            </div>
+            <span className="thread-pill">{visibleRelayCount} visible relays</span>
+          </div>
+          <div className="tile-list">
+            {pulseFeedItems.map((item) => {
+              const matchingPlace = getPlace(item.geohash);
+              const matchingProfile = getProfile(item.authorPubkey);
+
+              return (
+                <article key={item.id} className="tile-card pulse-card">
+                  <header>
+                    <div>
+                      <strong>{item.authorName}</strong>
+                      <p className="tile-kicker">
+                        {item.relayName} · {item.placeTitle}
+                      </p>
+                    </div>
+                    <span className="thread-pill">{item.sourceLabel}</span>
+                  </header>
+                  <p>{item.content}</p>
+                  <small>
+                    {item.sourceLabel} · {item.whyVisible} Published at {item.publishedAt}.
+                  </small>
+                  <div className="action-row pulse-card-actions">
+                    <span className={item.local ? "thread-pill live" : "thread-pill"}>{item.lane}</span>
+                    {!item.local ? (
+                      <a className="secondary-link" href={item.relayUrl} target="_blank" rel="noreferrer">
+                        Open relay
+                      </a>
+                    ) : null}
+                    {item.noteId ? (
+                      <Link
+                        className="secondary-link"
+                        to={`/app/pulse?note=${encodeURIComponent(item.noteId)}`}
+                      >
+                        Open note
+                      </Link>
+                    ) : null}
+                    {matchingPlace ? (
+                      <Link
+                        className="secondary-link"
+                        to={`/app/chats?geohash=${encodeURIComponent(item.geohash)}`}
+                      >
+                        {item.local ? "Open chat" : "Compare local chat"}
+                      </Link>
+                    ) : null}
+                    {matchingProfile ? (
+                      <Link
+                        className="secondary-link"
+                        to={`/app/pulse?profile=${encodeURIComponent(item.authorPubkey)}`}
+                      >
+                        View local profile
+                      </Link>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
       {pinnedNotes.length > 0 ? (
         <section className="pulse-section">
           <div className="detail-header">
@@ -263,31 +339,6 @@ export function PulseRoute() {
             <p>{segment.description}</p>
           </article>
         ))}
-      </div>
-
-      <div className="note-list">
-        {recentNotes.map((recentNote) => {
-          const author = getProfile(recentNote.authorPubkey);
-          const place = getPlace(recentNote.geohash);
-
-          return (
-            <article key={recentNote.id} className="tile-card">
-              <header>
-                <div>
-                  <strong>{author?.displayName ?? recentNote.authorPubkey}</strong>
-                  <p className="tile-kicker">{place?.title ?? recentNote.geohash}</p>
-                </div>
-                <Link
-                  className="secondary-link"
-                  to={`/app/chats?geohash=${encodeURIComponent(recentNote.geohash)}`}
-                >
-                  Open chat
-                </Link>
-              </header>
-              <p>{recentNote.content}</p>
-            </article>
-          );
-        })}
       </div>
     </section>
   );

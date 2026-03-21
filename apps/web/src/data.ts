@@ -1,4 +1,6 @@
 export const relayOperatorPubkey = "npub1operator";
+export const relayName = "Synchrono City Local";
+export const relayURL = "ws://localhost:8080";
 export const currentUserPubkey = "npub1scout";
 
 // Seed data below is a fallback copy of Concierge's seed data.
@@ -55,6 +57,38 @@ export type GeoNote = {
 export type FeedSegment = {
   name: string;
   description: string;
+};
+
+export type CrossRelayFeedItem = {
+  id: string;
+  relayName: string;
+  relayUrl: string;
+  authorPubkey: string;
+  authorName: string;
+  geohash: string;
+  placeTitle: string;
+  content: string;
+  publishedAt: string;
+  sourceLabel: string;
+  whyVisible: string;
+};
+
+export type PulseFeedItem = {
+  id: string;
+  lane: "Following" | "Local" | "For You";
+  kind: "local_note" | "cross_relay";
+  relayName: string;
+  relayUrl: string;
+  authorPubkey: string;
+  authorName: string;
+  geohash: string;
+  placeTitle: string;
+  content: string;
+  publishedAt: string;
+  sourceLabel: string;
+  whyVisible: string;
+  local: boolean;
+  noteId?: string;
 };
 
 export type RelaySynthesis = {
@@ -279,6 +313,35 @@ export const feedSegments: FeedSegment[] = [
   { name: "For You", description: "Concierge-produced merge across relays and follows." }
 ];
 
+export const crossRelayFeedItems: CrossRelayFeedItem[] = [
+  {
+    id: "cross-relay-plaza",
+    relayName: "Mission Mesh",
+    relayUrl: "wss://mission-mesh.example/relay",
+    authorPubkey: "npub1tala",
+    authorName: "Tala North",
+    geohash: "9q8yyk",
+    placeTitle: "Civic plaza",
+    content: "March overflow is heading for the east stairs. Keep the plaza audio room open for late arrivals.",
+    publishedAt: "2026-03-18T18:12:00Z",
+    sourceLabel: "Direct follow",
+    whyVisible: "Followed author on a configured relay is posting about the same public tile."
+  },
+  {
+    id: "cross-relay-annex",
+    relayName: "Harbor Dispatch",
+    relayUrl: "wss://harbor-dispatch.example/relay",
+    authorPubkey: "npub1ines",
+    authorName: "Ines Park",
+    geohash: "9q8yym",
+    placeTitle: "Warehouse annex",
+    content: "Venue queue is clear from the alley entrance. Remote listeners are joining the annex room from two relays.",
+    publishedAt: "2026-03-18T18:06:00Z",
+    sourceLabel: "Relay list",
+    whyVisible: "Configured relay surfaced a matching logistics thread for an active local place."
+  }
+];
+
 export function resolveRoomID(geohash: string, operatorPubkey = relayOperatorPubkey) {
   return `geo:${operatorPubkey}:${geohash}`;
 }
@@ -455,6 +518,57 @@ export function listRecentNotes(notes: GeoNote[]) {
 
 export function listNotesByAuthor(notes: GeoNote[], pubkey: string) {
   return sortNotesByRecency(notes.filter((note) => note.authorPubkey === pubkey));
+}
+
+export function buildPulseFeedItems(
+  places: Place[],
+  notes: GeoNote[],
+  profiles: ParticipantProfile[],
+  remoteItems: CrossRelayFeedItem[],
+  localRelayName = relayName,
+  localRelayUrl = relayURL
+) {
+  const placesByGeohash = buildPlaceMap(places);
+  const profilesByPubkey = buildParticipantMap(profiles);
+
+  const localItems: PulseFeedItem[] = listRecentNotes(notes).map((note) => ({
+    id: `pulse-local-${note.id}`,
+    lane: "Local",
+    kind: "local_note",
+    relayName: localRelayName,
+    relayUrl: localRelayUrl,
+    authorPubkey: note.authorPubkey,
+    authorName: profilesByPubkey.get(note.authorPubkey)?.displayName ?? note.authorPubkey,
+    geohash: note.geohash,
+    placeTitle: placesByGeohash.get(note.geohash)?.title ?? note.geohash,
+    content: note.content,
+    publishedAt: note.createdAt,
+    sourceLabel: "Local relay",
+    whyVisible: "Published on the active relay and merged with followed and discovered relay context.",
+    local: true,
+    noteId: note.id
+  }));
+
+  const crossRelayFeed: PulseFeedItem[] = remoteItems.map((item) => ({
+    id: `pulse-remote-${item.id}`,
+    lane: item.sourceLabel === "Direct follow" ? "Following" : "For You",
+    kind: "cross_relay",
+    relayName: item.relayName,
+    relayUrl: item.relayUrl,
+    authorPubkey: item.authorPubkey,
+    authorName: item.authorName,
+    geohash: item.geohash,
+    placeTitle: item.placeTitle,
+    content: item.content,
+    publishedAt: item.publishedAt,
+    sourceLabel: item.sourceLabel,
+    whyVisible: item.whyVisible,
+    local: false
+  }));
+
+  return [...localItems, ...crossRelayFeed].sort((left, right) =>
+    right.publishedAt.localeCompare(left.publishedAt)
+  );
 }
 
 export function buildStoryExport(

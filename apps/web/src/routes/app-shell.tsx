@@ -44,7 +44,7 @@ function AppShellLayout() {
           ))}
         </nav>
         <div className="app-bar-status">
-          <span className="status-pill status-pill-live">Roadmap: Phase 5</span>
+          <span className="status-pill status-pill-live">Roadmap: Phase 6</span>
           <span className="status-pill">{sceneHealth.activeTiles} live tiles</span>
           <span className="status-pill">{sceneHealth.openSeats} open seats</span>
           <span className={activeCall ? "status-pill status-pill-live" : "status-pill"}>

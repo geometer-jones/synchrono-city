@@ -34,7 +34,7 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestSocialBootstrapReturnsPhaseTwoData(t *testing.T) {
+func TestSocialBootstrapReturnsPhaseSixData(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
 	}, store.NewMemory())
@@ -49,7 +49,9 @@ func TestSocialBootstrapReturnsPhaseTwoData(t *testing.T) {
 	}
 
 	var response struct {
+		RelayName           string `json:"relay_name"`
 		RelayOperatorPubkey string `json:"relay_operator_pubkey"`
+		RelayURL            string `json:"relay_url"`
 		Places              []struct {
 			Geohash string `json:"geohash"`
 		} `json:"places"`
@@ -59,6 +61,10 @@ func TestSocialBootstrapReturnsPhaseTwoData(t *testing.T) {
 		Notes []struct {
 			ID string `json:"id"`
 		} `json:"notes"`
+		CrossRelayItems []struct {
+			ID        string `json:"id"`
+			RelayName string `json:"relay_name"`
+		} `json:"cross_relay_items"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -66,8 +72,14 @@ func TestSocialBootstrapReturnsPhaseTwoData(t *testing.T) {
 	if response.RelayOperatorPubkey != "npub1operator" {
 		t.Fatalf("expected operator pubkey, got %s", response.RelayOperatorPubkey)
 	}
+	if response.RelayName == "" || response.RelayURL == "" {
+		t.Fatalf("expected relay metadata, got name=%q url=%q", response.RelayName, response.RelayURL)
+	}
 	if len(response.Places) == 0 || len(response.Profiles) == 0 || len(response.Notes) == 0 {
 		t.Fatalf("expected seeded bootstrap data, got %+v", response)
+	}
+	if len(response.CrossRelayItems) == 0 || response.CrossRelayItems[0].RelayName == "" {
+		t.Fatalf("expected cross-relay bootstrap data, got %+v", response.CrossRelayItems)
 	}
 }
 

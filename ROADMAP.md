@@ -85,6 +85,16 @@ Related docs:
 - [x] AI synthesis
 - [x] Relay feed pinning and editorial controls
 
+### Phase 6: Cross-Relay Feeds
+
+**Duration:** 3-4 weeks
+
+**Deliverables:**
+- [x] Cross-relay feed UX
+- [x] Merged local + remote Pulse feed ordering
+- [x] Explicit relay provenance in Pulse
+- [x] Follow-first merge explanation for remote items
+
 ---
 
 ## 2. Deferred Items
@@ -116,15 +126,6 @@ Deferred items from the CEO Plan Review (2026-03-18).
 - **Priority:** P2
 - **Notes:** Build around NIP-65 relay lists and follow graph hints
 
-### Phase 5 (Intelligence)
-
-#### Cross-Relay Feed UX
-- **What:** Merge local relay content with followed authors and configured relays in a legible way
-- **Why:** Relay adoption only helps if clients can explain where content came from
-- **Effort:** L
-- **Priority:** P3
-- **Notes:** Favor direct follows and explicit relay labels
-
 ### Operational
 
 #### Runbooks
@@ -144,8 +145,7 @@ Deferred items from the CEO Plan Review (2026-03-18).
 
 ## 3. Open Questions
 
-1. **Cross-relay following UX:** How should the client merge local relay content with content from followed authors on other relays?
-2. **Premium precision:** What are the default gating policies for exact coordinates?
-3. **Mobile strategy:** PWA-only vs native apps?
-4. **Search engine:** PostgreSQL full-text vs Meilisearch vs Elasticsearch?
-5. **Map tiles:** Self-hosted vs Mapbox/MapTiler?
+1. **Premium precision:** What are the default gating policies for exact coordinates?
+2. **Mobile strategy:** PWA-only vs native apps?
+3. **Search engine:** PostgreSQL full-text vs Meilisearch vs Elasticsearch?
+4. **Map tiles:** Self-hosted vs Mapbox/MapTiler?

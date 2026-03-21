@@ -8,30 +8,51 @@ import (
 
 func TestNewService(t *testing.T) {
 	t.Run("uses provided operator pubkey", func(t *testing.T) {
-		svc := NewService("npub1custom", nil)
+		svc := NewService("npub1custom", "Relay Alpha", "wss://alpha.example", nil)
 		if svc.operatorPubkey != "npub1custom" {
 			t.Errorf("expected operatorPubkey npub1custom, got %s", svc.operatorPubkey)
+		}
+		if svc.relayName != "Relay Alpha" {
+			t.Errorf("expected relayName Relay Alpha, got %s", svc.relayName)
+		}
+		if svc.relayURL != "wss://alpha.example" {
+			t.Errorf("expected relayURL wss://alpha.example, got %s", svc.relayURL)
 		}
 	})
 
 	t.Run("falls back to default operator pubkey when empty", func(t *testing.T) {
-		svc := NewService("", nil)
+		svc := NewService("", "", "", nil)
 		if svc.operatorPubkey != fallbackOperatorPubkey {
 			t.Errorf("expected fallback operator pubkey, got %s", svc.operatorPubkey)
 		}
 	})
 
 	t.Run("falls back to default operator pubkey when whitespace", func(t *testing.T) {
-		svc := NewService("   ", nil)
+		svc := NewService("   ", "   ", "   ", nil)
 		if svc.operatorPubkey != fallbackOperatorPubkey {
 			t.Errorf("expected fallback operator pubkey, got %s", svc.operatorPubkey)
+		}
+		if svc.relayName != fallbackRelayName {
+			t.Errorf("expected fallback relay name, got %s", svc.relayName)
+		}
+		if svc.relayURL != fallbackRelayURL {
+			t.Errorf("expected fallback relay URL, got %s", svc.relayURL)
 		}
 	})
 }
 
 func TestBootstrap(t *testing.T) {
-	svc := NewService("npub1test", nil)
+	svc := NewService("npub1test", "Test Relay", "wss://test-relay.example", nil)
 	resp := svc.Bootstrap()
+
+	t.Run("returns relay metadata", func(t *testing.T) {
+		if resp.RelayName != "Test Relay" {
+			t.Errorf("expected RelayName Test Relay, got %s", resp.RelayName)
+		}
+		if resp.RelayURL != "wss://test-relay.example" {
+			t.Errorf("expected RelayURL wss://test-relay.example, got %s", resp.RelayURL)
+		}
+	})
 
 	t.Run("returns operator pubkey", func(t *testing.T) {
 		if resp.RelayOperatorPubkey != "npub1test" {
@@ -69,11 +90,21 @@ func TestBootstrap(t *testing.T) {
 		}
 	})
 
+	t.Run("returns cross-relay items", func(t *testing.T) {
+		if len(resp.CrossRelayItems) == 0 {
+			t.Error("expected at least one cross-relay item")
+		}
+	})
+
 	t.Run("returns copy of data", func(t *testing.T) {
 		resp.Places[0].Title = "modified"
+		resp.CrossRelayItems[0].RelayName = "modified relay"
 		resp2 := svc.Bootstrap()
 		if resp2.Places[0].Title == "modified" {
 			t.Error("Bootstrap should return a copy, not a reference")
+		}
+		if resp2.CrossRelayItems[0].RelayName == "modified relay" {
+			t.Error("Bootstrap should return a copy of cross-relay items, not a reference")
 		}
 	})
 }

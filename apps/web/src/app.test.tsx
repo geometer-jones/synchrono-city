@@ -216,13 +216,19 @@ describe("app shell", () => {
     expect(await screen.findByRole("heading", { name: /mika hart/i })).toBeInTheDocument();
   });
 
-  it("renders phase 5 synthesis and editorial sections in pulse", () => {
+  it("renders a merged phase 6 feed alongside synthesis and editorial sections in pulse", () => {
     renderRouter("/app/pulse");
 
     expect(screen.getByRole("heading", { name: /ai synthesis/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /cross-relay merge/i })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /operator pins/i })).toBeInTheDocument();
     expect(screen.getByText(/tenant organizing thread with a pinned logistics note and a live room\./i)).toBeInTheDocument();
+    expect(screen.getAllByText(/local relay/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/mission mesh/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /cite aurora vale/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /open note/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("link", { name: /compare local chat/i })).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: /open relay/i })).toHaveLength(2);
   });
 
   it("renders the settings route", async () => {

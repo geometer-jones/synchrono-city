@@ -42,7 +42,7 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 		tokenService:  scLiveKit.NewTokenService(cfg, policyStore),
 		policyService: policy.NewService(policyStore, cfg.PrimaryOperatorPub),
 		relayAuth:     relayauth.NewEvaluator(policy.NewService(policyStore, cfg.PrimaryOperatorPub)),
-		socialService: social.NewService(cfg.PrimaryOperatorPub, policyStore),
+		socialService: social.NewService(cfg.PrimaryOperatorPub, cfg.RelayName, cfg.PrimaryRelayURL, policyStore),
 		adminLimiter:  newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
 	}
 

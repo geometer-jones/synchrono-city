@@ -11,6 +11,7 @@ import {
 
 import { apiFetch } from "./api";
 import {
+  buildPulseFeedItems,
   buildRelaySyntheses,
   buildNoteMap,
   buildParticipantMap,
@@ -18,6 +19,7 @@ import {
   buildPlaceTiles,
   buildStoryExport,
   buildThreads,
+  crossRelayFeedItems,
   createEphemeralPlace,
   currentUserPubkey,
   feedSegments,
@@ -25,15 +27,19 @@ import {
   listNotesByAuthor,
   listNotesForPlace,
   listRecentNotes,
+  relayName as defaultRelayName,
   relayOperatorPubkey as defaultRelayOperatorPubkey,
+  relayURL as defaultRelayURL,
   seedNotes,
   seedPlaces,
   seedProfiles,
   type CallSession,
+  type CrossRelayFeedItem,
   type FeedSegment,
   type GeoNote,
   type ParticipantProfile,
   type Place,
+  type PulseFeedItem,
   type RelaySynthesis
 } from "./data";
 import { connectLiveKitSession, type LiveKitParticipantState, type LiveKitSession } from "./livekit-session";
@@ -43,8 +49,11 @@ import { showToast } from "./toast";
 type CallControl = "mic" | "cam" | "screenshare" | "deafen";
 
 type BootstrapPayload = {
+  relay_name?: string;
   relay_operator_pubkey: string;
+  relay_url?: string;
   feed_segments?: FeedSegment[];
+  cross_relay_items?: CrossRelayFeedItem[];
   places: Place[];
   profiles: ParticipantProfile[];
   notes: GeoNote[];
@@ -71,8 +80,12 @@ type PlaceMediaAsset = {
 
 type AppStateValue = {
   currentUser: ParticipantProfile;
+  relayName: string;
   relayOperatorPubkey: string;
+  relayURL: string;
   feedSegments: FeedSegment[];
+  crossRelayItems: CrossRelayFeedItem[];
+  pulseFeedItems: PulseFeedItem[];
   relaySyntheses: RelaySynthesis[];
   places: Place[];
   profiles: ParticipantProfile[];
@@ -102,12 +115,15 @@ type AppStateValue = {
 const AppStateContext = createContext<AppStateValue | null>(null);
 
 export function AppStateProvider({ children }: PropsWithChildren) {
+  const [relayName, setRelayName] = useState(defaultRelayName);
   const [relayOperatorPubkey, setRelayOperatorPubkey] = useState(defaultRelayOperatorPubkey);
+  const [relayURL, setRelayURL] = useState(defaultRelayURL);
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
   const [placesState, setPlacesState] = useState(seedPlaces);
   const [profilesState, setProfilesState] = useState(seedProfiles);
   const [notesState, setNotesState] = useState(seedNotes);
   const [feedSegmentsState, setFeedSegmentsState] = useState(feedSegments);
+  const [crossRelayItemsState, setCrossRelayItemsState] = useState(crossRelayFeedItems);
   const [placeMediaState, setPlaceMediaState] = useState<PlaceMediaAsset[]>([]);
   const activeCallRequestRef = useRef(0);
   const liveKitSessionRef = useRef<LiveKitSession | null>(null);
@@ -126,8 +142,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         }
 
         startTransition(() => {
+          setRelayName(payload.relay_name || defaultRelayName);
           setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setRelayURL(payload.relay_url || defaultRelayURL);
           setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
+          setCrossRelayItemsState(
+            payload.cross_relay_items?.length ? payload.cross_relay_items : crossRelayFeedItems
+          );
           setPlacesState(payload.places);
           setProfilesState(payload.profiles);
           setNotesState(payload.notes);
@@ -153,11 +174,25 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const effectiveProfiles = profilesState.length > 0 ? profilesState : seedProfiles;
   const effectiveNotes = notesState.length > 0 ? notesState : seedNotes;
   const effectiveFeedSegments = feedSegmentsState.length > 0 ? feedSegmentsState : feedSegments;
+  const effectiveCrossRelayItems =
+    crossRelayItemsState.length > 0 ? crossRelayItemsState : crossRelayFeedItems;
 
   const placeMap = useMemo(() => buildPlaceMap(effectivePlaces), [effectivePlaces]);
   const profileMap = useMemo(() => buildParticipantMap(effectiveProfiles), [effectiveProfiles]);
   const noteMap = useMemo(() => buildNoteMap(effectiveNotes), [effectiveNotes]);
   const relaySyntheses = useMemo(() => buildRelaySyntheses(effectivePlaces, effectiveNotes), [effectivePlaces, effectiveNotes]);
+  const pulseFeedItems = useMemo(
+    () =>
+      buildPulseFeedItems(
+        effectivePlaces,
+        effectiveNotes,
+        effectiveProfiles,
+        effectiveCrossRelayItems,
+        relayName,
+        relayURL
+      ),
+    [effectiveCrossRelayItems, effectiveNotes, effectivePlaces, effectiveProfiles, relayName, relayURL]
+  );
 
   const currentUser = profileMap.get(currentUserPubkey) ?? effectiveProfiles[0];
   const sceneHealth = useMemo(
@@ -195,8 +230,12 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const value = useMemo<AppStateValue>(
     () => ({
       currentUser,
+      relayName,
       relayOperatorPubkey,
+      relayURL,
       feedSegments: effectiveFeedSegments,
+      crossRelayItems: effectiveCrossRelayItems,
+      pulseFeedItems,
       relaySyntheses,
       places: effectivePlaces,
       profiles: effectiveProfiles,
@@ -253,8 +292,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
 
         const payload = await apiFetch<BootstrapPayload>("/api/v1/social/bootstrap");
         startTransition(() => {
+          setRelayName(payload.relay_name || defaultRelayName);
           setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setRelayURL(payload.relay_url || defaultRelayURL);
           setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
+          setCrossRelayItemsState(
+            payload.cross_relay_items?.length ? payload.cross_relay_items : crossRelayFeedItems
+          );
           setPlacesState(payload.places);
           setProfilesState(payload.profiles);
           setNotesState(payload.notes);
@@ -569,14 +613,18 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       activeCall,
       currentUser,
       effectiveFeedSegments,
+      effectiveCrossRelayItems,
       effectiveNotes,
       effectivePlaces,
       effectiveProfiles,
       noteMap,
       placeMediaState,
       placeMap,
+      pulseFeedItems,
       profileMap,
+      relayName,
       relayOperatorPubkey,
+      relayURL,
       relaySyntheses,
       sceneHealth
     ]
