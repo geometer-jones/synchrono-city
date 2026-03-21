@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 
 	livekitauth "github.com/livekit/protocol/auth"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/config"
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/social"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
@@ -38,6 +41,41 @@ func TestSocialBootstrapReturnsPhaseSixData(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
 	}, store.NewMemory())
+
+	seedSocialScene(t, srv,
+		[]social.Place{{
+			Geohash:         "9q8yyk",
+			Title:           "Civic plaza",
+			OccupantPubkeys: []string{"npub1aurora"},
+		}},
+		[]social.Profile{{
+			Pubkey:      "npub1aurora",
+			DisplayName: "Aurora Vale",
+			Role:        "Tenant organizer",
+			Status:      "Coordinating arrivals.",
+			Bio:         "Local organizer.",
+		}},
+		[]social.Note{{
+			ID:           "note-plaza",
+			Geohash:      "9q8yyk",
+			AuthorPubkey: "npub1aurora",
+			Content:      "The plaza is active.",
+			CreatedAt:    "2026-03-18T18:20:00Z",
+		}},
+		[]social.CrossRelayFeedItem{{
+			ID:           "cross-relay-plaza",
+			RelayName:    "Mission Mesh",
+			RelayURL:     "wss://mission-mesh.example/relay",
+			AuthorPubkey: "npub1remote",
+			AuthorName:   "Remote Scout",
+			Geohash:      "9q8yyk",
+			PlaceTitle:   "Civic plaza",
+			Content:      "Cross-relay context.",
+			PublishedAt:  "2026-03-18T18:12:00Z",
+			SourceLabel:  "Direct follow",
+			WhyVisible:   "Same active tile.",
+		}},
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
 	rec := httptest.NewRecorder()
@@ -75,11 +113,11 @@ func TestSocialBootstrapReturnsPhaseSixData(t *testing.T) {
 	if response.RelayName == "" || response.RelayURL == "" {
 		t.Fatalf("expected relay metadata, got name=%q url=%q", response.RelayName, response.RelayURL)
 	}
-	if len(response.Places) == 0 || len(response.Profiles) == 0 || len(response.Notes) == 0 {
-		t.Fatalf("expected seeded bootstrap data, got %+v", response)
+	if len(response.Places) != 1 || len(response.Profiles) != 1 || len(response.Notes) != 1 {
+		t.Fatalf("expected only explicitly seeded social data, got %+v", response)
 	}
 	if len(response.CrossRelayItems) == 0 || response.CrossRelayItems[0].RelayName == "" {
-		t.Fatalf("expected cross-relay bootstrap data, got %+v", response.CrossRelayItems)
+		t.Fatalf("expected seeded cross-relay data, got %+v", response.CrossRelayItems)
 	}
 }
 
@@ -87,6 +125,7 @@ func TestSocialNoteCreateAppendsNewNote(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
 	}, store.NewMemory())
+	seedSocialScene(t, srv, []social.Place{{Geohash: "9q8yyk", Title: "Civic plaza"}}, nil, nil, nil)
 
 	payload := []byte(`{"geohash":"9q8yyk","author_pubkey":"npub1scout","content":"Meet at the fountain in five."}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/notes", bytes.NewReader(payload))
@@ -110,6 +149,9 @@ func TestSocialNoteCreateAppendsNewNote(t *testing.T) {
 	if err := json.Unmarshal(bootstrapRec.Body.Bytes(), &bootstrap); err != nil {
 		t.Fatalf("decode bootstrap: %v", err)
 	}
+	if len(bootstrap.Notes) != 1 {
+		t.Fatalf("expected created note only, got %+v", bootstrap.Notes)
+	}
 	if bootstrap.Notes[0].Content != "Meet at the fountain in five." {
 		t.Fatalf("expected newest note first, got %+v", bootstrap.Notes[0])
 	}
@@ -119,6 +161,11 @@ func TestSocialCallIntentResolvesRoomID(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
 	}, store.NewMemory())
+	seedSocialScene(t, srv, []social.Place{{
+		Geohash:         "9q8yyk",
+		Title:           "Civic plaza",
+		OccupantPubkeys: []string{"npub1aurora"},
+	}}, nil, nil, nil)
 
 	payload := []byte(`{"geohash":"9q8yyk","pubkey":"npub1scout"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/call-intent", bytes.NewReader(payload))
@@ -142,6 +189,40 @@ func TestSocialCallIntentResolvesRoomID(t *testing.T) {
 	}
 	if len(response.ParticipantPubkeys) == 0 || response.ParticipantPubkeys[0] != "npub1scout" {
 		t.Fatalf("expected current user in participant list, got %+v", response.ParticipantPubkeys)
+	}
+}
+
+func TestSocialCallIntentCreatesAdHocRoomID(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	payload := []byte(`{"geohash":"9q8yyz","pubkey":"npub1wanderer"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/call-intent", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var response struct {
+		RoomID             string   `json:"room_id"`
+		PlaceTitle         string   `json:"place_title"`
+		ParticipantPubkeys []string `json:"participant_pubkeys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.RoomID != "geo:npub1operator:9q8yyz" {
+		t.Fatalf("expected room id, got %s", response.RoomID)
+	}
+	if response.PlaceTitle != "Field tile 9q8yyz" {
+		t.Fatalf("expected ad-hoc place title, got %s", response.PlaceTitle)
+	}
+	if len(response.ParticipantPubkeys) != 1 || response.ParticipantPubkeys[0] != "npub1wanderer" {
+		t.Fatalf("expected caller-only participant list, got %+v", response.ParticipantPubkeys)
 	}
 }
 
@@ -700,6 +781,21 @@ func TestSocialBootstrapAppliesEditorialPinFromStore(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "operator",
 	}, policyStore)
+	seedSocialScene(t, srv,
+		[]social.Place{{
+			Geohash: "9q8yym",
+			Title:   "Warehouse annex",
+		}},
+		nil,
+		[]social.Note{{
+			ID:           "note-annex-move",
+			Geohash:      "9q8yym",
+			AuthorPubkey: "npub1mika",
+			Content:      "Afterparty moved indoors. Audio room is live.",
+			CreatedAt:    "2026-03-18T18:15:00Z",
+		}},
+		nil,
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
 	rec := httptest.NewRecorder()
@@ -756,6 +852,31 @@ func mustPublicKey(t *testing.T, secretKey string) string {
 		t.Fatalf("derive public key: %v", err)
 	}
 	return pubkey
+}
+
+func seedSocialScene(
+	t *testing.T,
+	srv *Server,
+	places []social.Place,
+	profiles []social.Profile,
+	notes []social.Note,
+	crossRelayItems []social.CrossRelayFeedItem,
+) {
+	t.Helper()
+	setUnexportedField(t, srv.socialService, "places", places)
+	setUnexportedField(t, srv.socialService, "profiles", profiles)
+	setUnexportedField(t, srv.socialService, "notes", notes)
+	setUnexportedField(t, srv.socialService, "crossRelayItems", crossRelayItems)
+	setUnexportedField(t, srv.socialService, "nextNoteID", int64(len(notes)))
+}
+
+func setUnexportedField[T any](t *testing.T, target any, fieldName string, value T) {
+	t.Helper()
+	field := reflect.ValueOf(target).Elem().FieldByName(fieldName)
+	if !field.IsValid() {
+		t.Fatalf("field %s not found", fieldName)
+	}
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(value))
 }
 
 func withNIP98Auth(t *testing.T, req *http.Request, secretKey string, body []byte) {

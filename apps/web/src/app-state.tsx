@@ -9,7 +9,8 @@ import {
   type PropsWithChildren
 } from "react";
 
-import { apiFetch } from "./api";
+import { ApiError, apiFetch } from "./api";
+import { getActiveLocalKey, loadStoredLocalKeyring } from "./key-manager";
 import {
   buildPulseFeedItems,
   buildRelaySyntheses,
@@ -19,10 +20,11 @@ import {
   buildPlaceTiles,
   buildStoryExport,
   buildThreads,
-  crossRelayFeedItems,
+  compareDescendingTimestamps,
+  createFallbackCurrentUser,
+  createFallbackParticipantProfile,
   createEphemeralPlace,
-  currentUserPubkey,
-  feedSegments,
+  currentUserPubkey as defaultCurrentUserPubkey,
   getSceneHealthStats,
   listNotesByAuthor,
   listNotesForPlace,
@@ -30,9 +32,6 @@ import {
   relayName as defaultRelayName,
   relayOperatorPubkey as defaultRelayOperatorPubkey,
   relayURL as defaultRelayURL,
-  seedNotes,
-  seedPlaces,
-  seedProfiles,
   type CallSession,
   type CrossRelayFeedItem,
   type FeedSegment,
@@ -44,27 +43,15 @@ import {
 } from "./data";
 import { connectLiveKitSession, type LiveKitParticipantState, type LiveKitSession } from "./livekit-session";
 import { hasNostrSigner, MediaAuthError, requestLiveKitToken, uploadBlossomFile } from "./media-client";
+import {
+  normalizeBootstrapPayload,
+  normalizeCallIntentPayload,
+  type BootstrapPayload,
+  type CallIntentPayload
+} from "./social-payload";
 import { showToast } from "./toast";
 
 type CallControl = "mic" | "cam" | "screenshare" | "deafen";
-
-type BootstrapPayload = {
-  relay_name?: string;
-  relay_operator_pubkey: string;
-  relay_url?: string;
-  feed_segments?: FeedSegment[];
-  cross_relay_items?: CrossRelayFeedItem[];
-  places: Place[];
-  profiles: ParticipantProfile[];
-  notes: GeoNote[];
-};
-
-type CallIntentPayload = {
-  geohash: string;
-  room_id: string;
-  place_title: string;
-  participant_pubkeys: string[];
-};
 
 type PlaceMediaAsset = {
   id: string;
@@ -80,6 +67,7 @@ type PlaceMediaAsset = {
 
 type AppStateValue = {
   currentUser: ParticipantProfile;
+  currentSessionSource: "bootstrap" | "local";
   relayName: string;
   relayOperatorPubkey: string;
   relayURL: string;
@@ -103,6 +91,7 @@ type AppStateValue = {
   listNotesByAuthor: (pubkey: string) => GeoNote[];
   buildStoryExport: () => string;
   sceneHealth: ReturnType<typeof getSceneHealthStats>;
+  setLocalCurrentUserPubkey: (pubkey: string | null) => void;
   refreshSocialBootstrap: () => Promise<void>;
   createPlaceNote: (geohash: string, content: string) => GeoNote | null;
   uploadPlaceMedia: (geohash: string, file: File, signal?: AbortSignal) => Promise<PlaceMediaAsset | null>;
@@ -118,21 +107,21 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const [relayName, setRelayName] = useState(defaultRelayName);
   const [relayOperatorPubkey, setRelayOperatorPubkey] = useState(defaultRelayOperatorPubkey);
   const [relayURL, setRelayURL] = useState(defaultRelayURL);
+  const [bootstrapCurrentUserPubkey, setBootstrapCurrentUserPubkey] = useState(defaultCurrentUserPubkey);
+  const [currentUserPubkeyOverride, setCurrentUserPubkeyOverride] = useState<string | null>(
+    () => getActiveLocalKey(loadStoredLocalKeyring())?.publicKeyNpub ?? null
+  );
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
-  const [placesState, setPlacesState] = useState(seedPlaces);
-  const [profilesState, setProfilesState] = useState(seedProfiles);
-  const [notesState, setNotesState] = useState(seedNotes);
-  const [feedSegmentsState, setFeedSegmentsState] = useState(feedSegments);
-  const [crossRelayItemsState, setCrossRelayItemsState] = useState(crossRelayFeedItems);
+  const [placesState, setPlacesState] = useState<Place[]>([]);
+  const [profilesState, setProfilesState] = useState<ParticipantProfile[]>([]);
+  const [notesState, setNotesState] = useState<GeoNote[]>([]);
+  const [feedSegmentsState, setFeedSegmentsState] = useState<FeedSegment[]>([]);
+  const [crossRelayItemsState, setCrossRelayItemsState] = useState<CrossRelayFeedItem[]>([]);
   const [placeMediaState, setPlaceMediaState] = useState<PlaceMediaAsset[]>([]);
   const activeCallRequestRef = useRef(0);
   const liveKitSessionRef = useRef<LiveKitSession | null>(null);
 
   useEffect(() => {
-    if (import.meta.env.MODE === "test") {
-      return;
-    }
-
     let cancelled = false;
 
     void apiFetch<BootstrapPayload>("/api/v1/social/bootstrap")
@@ -141,21 +130,22 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           return;
         }
 
+        const normalizedPayload = normalizeBootstrapPayload(payload);
+
         startTransition(() => {
-          setRelayName(payload.relay_name || defaultRelayName);
-          setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
-          setRelayURL(payload.relay_url || defaultRelayURL);
-          setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
-          setCrossRelayItemsState(
-            payload.cross_relay_items?.length ? payload.cross_relay_items : crossRelayFeedItems
-          );
-          setPlacesState(payload.places);
-          setProfilesState(payload.profiles);
-          setNotesState(payload.notes);
+          setRelayName(normalizedPayload.relay_name || defaultRelayName);
+          setRelayOperatorPubkey(normalizedPayload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setRelayURL(normalizedPayload.relay_url || defaultRelayURL);
+          setBootstrapCurrentUserPubkey(normalizedPayload.current_user_pubkey || defaultCurrentUserPubkey);
+          setFeedSegmentsState(normalizedPayload.feed_segments);
+          setCrossRelayItemsState(normalizedPayload.cross_relay_items);
+          setPlacesState(normalizedPayload.places);
+          setProfilesState(normalizedPayload.profiles);
+          setNotesState(normalizedPayload.notes);
         });
       })
       .catch(() => {
-        showToast("Unable to connect to server. Using cached data.", "error");
+        showToast("Unable to connect to server.", "error");
       });
 
     return () => {
@@ -170,17 +160,21 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
-  const effectivePlaces = placesState.length > 0 ? placesState : seedPlaces;
-  const effectiveProfiles = profilesState.length > 0 ? profilesState : seedProfiles;
-  const effectiveNotes = notesState.length > 0 ? notesState : seedNotes;
-  const effectiveFeedSegments = feedSegmentsState.length > 0 ? feedSegmentsState : feedSegments;
-  const effectiveCrossRelayItems =
-    crossRelayItemsState.length > 0 ? crossRelayItemsState : crossRelayFeedItems;
+  const effectiveCurrentUserPubkey =
+    currentUserPubkeyOverride?.trim() || bootstrapCurrentUserPubkey.trim() || defaultCurrentUserPubkey;
+  const effectivePlaces = placesState;
+  const effectiveProfiles = profilesState;
+  const effectiveNotes = notesState;
+  const effectiveFeedSegments = feedSegmentsState;
+  const effectiveCrossRelayItems = crossRelayItemsState;
 
   const placeMap = useMemo(() => buildPlaceMap(effectivePlaces), [effectivePlaces]);
   const profileMap = useMemo(() => buildParticipantMap(effectiveProfiles), [effectiveProfiles]);
   const noteMap = useMemo(() => buildNoteMap(effectiveNotes), [effectiveNotes]);
-  const relaySyntheses = useMemo(() => buildRelaySyntheses(effectivePlaces, effectiveNotes), [effectivePlaces, effectiveNotes]);
+  const relaySyntheses = useMemo(
+    () => buildRelaySyntheses(effectivePlaces, effectiveNotes),
+    [effectivePlaces, effectiveNotes]
+  );
   const pulseFeedItems = useMemo(
     () =>
       buildPulseFeedItems(
@@ -194,7 +188,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     [effectiveCrossRelayItems, effectiveNotes, effectivePlaces, effectiveProfiles, relayName, relayURL]
   );
 
-  const currentUser = profileMap.get(currentUserPubkey) ?? effectiveProfiles[0];
+  const currentUser =
+    profileMap.get(effectiveCurrentUserPubkey) ?? createFallbackCurrentUser(effectiveCurrentUserPubkey);
   const sceneHealth = useMemo(
     () => getSceneHealthStats(effectivePlaces, effectiveNotes),
     [effectivePlaces, effectiveNotes]
@@ -220,6 +215,12 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       return {
         ...current,
         participantPubkeys: participants.map((participant) => participant.identity),
+        participantStates: participants.map((participant) => ({
+          pubkey: participant.identity,
+          mic: participant.mic,
+          cam: participant.cam,
+          screenshare: participant.screenshare
+        })),
         mic: localParticipant?.mic ?? current.mic,
         cam: localParticipant?.cam ?? current.cam,
         screenshare: localParticipant?.screenshare ?? current.screenshare
@@ -230,6 +231,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const value = useMemo<AppStateValue>(
     () => ({
       currentUser,
+      currentSessionSource: currentUserPubkeyOverride ? "local" : "bootstrap",
       relayName,
       relayOperatorPubkey,
       relayURL,
@@ -244,7 +246,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       listPlaceMedia: (geohash) =>
         placeMediaState
           .filter((asset) => asset.geohash === geohash)
-          .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt)),
+          .sort((left, right) => compareDescendingTimestamps(left.uploadedAt, right.uploadedAt)),
       getPlace: (geohash) =>
         placeMap.get(geohash) ??
         (activeCall?.geohash === geohash ? createEphemeralPlace(geohash) : undefined),
@@ -256,22 +258,45 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           effectivePlaces,
           effectiveNotes,
           activeCall,
-          currentUserPubkey,
+          effectiveCurrentUserPubkey,
           relayOperatorPubkey
-        ).find(
-          (entry) => entry.geohash === geohash
-        );
+        ).find((entry) => entry.geohash === geohash);
         if (!place && !thread) {
           return [];
         }
-        return (thread?.participants ?? [])
-          .map((pubkey) => profileMap.get(pubkey))
-          .filter((profile): profile is ParticipantProfile => Boolean(profile));
+        const participantStates =
+          activeCall?.geohash === geohash
+            ? new Map(activeCall.participantStates.map((participant) => [participant.pubkey, participant]))
+            : new Map<string, { pubkey: string; mic: boolean; cam: boolean; screenshare: boolean }>();
+
+        return (thread?.participants ?? []).map((pubkey) => {
+          const profile = profileMap.get(pubkey) ?? createFallbackParticipantProfile(pubkey);
+          const liveState = participantStates.get(pubkey);
+
+          return {
+            ...profile,
+            mic: liveState?.mic ?? profile.mic,
+            cam: liveState?.cam ?? profile.cam,
+            screenshare: liveState?.screenshare ?? profile.screenshare
+          };
+        });
       },
       listPlaceTiles: () =>
-        buildPlaceTiles(effectivePlaces, effectiveNotes, activeCall, currentUserPubkey, relayOperatorPubkey),
+        buildPlaceTiles(
+          effectivePlaces,
+          effectiveNotes,
+          activeCall,
+          effectiveCurrentUserPubkey,
+          relayOperatorPubkey
+        ),
       listThreads: () =>
-        buildThreads(effectivePlaces, effectiveNotes, activeCall, currentUserPubkey, relayOperatorPubkey),
+        buildThreads(
+          effectivePlaces,
+          effectiveNotes,
+          activeCall,
+          effectiveCurrentUserPubkey,
+          relayOperatorPubkey
+        ),
       listNotesForPlace: (geohash) => listNotesForPlace(effectiveNotes, geohash),
       listRecentNotes: () => listRecentNotes(effectiveNotes),
       listNotesByAuthor: (pubkey) => listNotesByAuthor(effectiveNotes, pubkey),
@@ -281,24 +306,27 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           effectiveNotes,
           effectiveProfiles,
           activeCall,
-          currentUserPubkey,
+          effectiveCurrentUserPubkey,
           relayOperatorPubkey
         ),
       sceneHealth,
+      setLocalCurrentUserPubkey: (pubkey) => {
+        const nextPubkey = pubkey?.trim() || null;
+        setCurrentUserPubkeyOverride(nextPubkey);
+      },
       refreshSocialBootstrap: async () => {
         if (import.meta.env.MODE === "test") {
           return;
         }
 
-        const payload = await apiFetch<BootstrapPayload>("/api/v1/social/bootstrap");
+        const payload = normalizeBootstrapPayload(await apiFetch<BootstrapPayload>("/api/v1/social/bootstrap"));
         startTransition(() => {
           setRelayName(payload.relay_name || defaultRelayName);
           setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
           setRelayURL(payload.relay_url || defaultRelayURL);
-          setFeedSegmentsState(payload.feed_segments?.length ? payload.feed_segments : feedSegments);
-          setCrossRelayItemsState(
-            payload.cross_relay_items?.length ? payload.cross_relay_items : crossRelayFeedItems
-          );
+          setBootstrapCurrentUserPubkey(payload.current_user_pubkey || defaultCurrentUserPubkey);
+          setFeedSegmentsState(payload.feed_segments);
+          setCrossRelayItemsState(payload.cross_relay_items);
           setPlacesState(payload.places);
           setProfilesState(payload.profiles);
           setNotesState(payload.notes);
@@ -313,7 +341,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         const nextNote = {
           id: `note-${Date.now()}`,
           geohash,
-          authorPubkey: currentUserPubkey,
+          authorPubkey: effectiveCurrentUserPubkey,
           content: trimmed,
           createdAt: new Date().toISOString(),
           replies: 0
@@ -325,17 +353,19 @@ export function AppStateProvider({ children }: PropsWithChildren) {
             method: "POST",
             body: JSON.stringify({
               geohash,
-              author_pubkey: currentUserPubkey,
+              author_pubkey: effectiveCurrentUserPubkey,
               content: trimmed
             })
-          }).then((serverNote) => {
-            setNotesState((previous) => [
-              serverNote,
-              ...previous.filter((note) => note.id !== nextNote.id)
-            ]);
-          }).catch(() => {
-            showToast("Note saved locally. Will sync when connected.", "info");
-          });
+          })
+            .then((serverNote) => {
+              setNotesState((previous) => [
+                serverNote,
+                ...previous.filter((note) => note.id !== nextNote.id)
+              ]);
+            })
+            .catch(() => {
+              showToast("Note saved locally. Will sync when connected.", "info");
+            });
         }
         return nextNote;
       },
@@ -355,7 +385,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           size: upload.size,
           fileName: file.name,
           uploadedAt: new Date().toISOString(),
-          uploadedByPubkey: currentUserPubkey
+          uploadedByPubkey: effectiveCurrentUserPubkey
         };
 
         setPlaceMediaState((previous) => [nextAsset, ...previous]);
@@ -381,6 +411,18 @@ export function AppStateProvider({ children }: PropsWithChildren) {
             roomID,
             placeTitle,
             participantPubkeys,
+            participantStates: participantPubkeys.map((pubkey) => {
+              const profile =
+                profileMap.get(pubkey) ??
+                (pubkey === effectiveCurrentUserPubkey ? currentUser : createFallbackParticipantProfile(pubkey));
+
+              return {
+                pubkey,
+                mic: profile.mic,
+                cam: profile.cam,
+                screenshare: profile.screenshare
+              };
+            }),
             transport: overrides?.transport ?? current?.transport ?? "local",
             connectionState: overrides?.connectionState ?? current?.connectionState ?? "local_preview",
             statusMessage:
@@ -412,9 +454,9 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           applyIntent(roomID, placeTitle, participantPubkeys, overrides);
         };
 
-        const fallbackParticipants = place.occupantPubkeys.includes(currentUserPubkey)
+        const fallbackParticipants = place.occupantPubkeys.includes(effectiveCurrentUserPubkey)
           ? place.occupantPubkeys
-          : [currentUserPubkey, ...place.occupantPubkeys];
+          : [effectiveCurrentUserPubkey, ...place.occupantPubkeys];
         const fallbackRoomID = `geo:${relayOperatorPubkey}:${geohash}`;
         const signerAvailable = hasNostrSigner();
 
@@ -438,10 +480,12 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                 method: "POST",
                 body: JSON.stringify({
                   geohash,
-                  pubkey: currentUserPubkey
+                  pubkey: effectiveCurrentUserPubkey
                 })
-              }).catch(() => {
-                showToast("Using fallback room. Server unavailable.", "info");
+              }).catch((error) => {
+                if (!(error instanceof ApiError) || error.status >= 500) {
+                  showToast("Using fallback room. Server unavailable.", "info");
+                }
                 return {
                   geohash,
                   room_id: fallbackRoomID,
@@ -451,7 +495,15 @@ export function AppStateProvider({ children }: PropsWithChildren) {
               });
 
         void intentPromise.then(async (payload) => {
-          applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+          const normalizedPayload = normalizeCallIntentPayload(payload);
+          const roomID = normalizedPayload.room_id || fallbackRoomID;
+          const placeTitle = normalizedPayload.place_title || place.title;
+          const participantPubkeys =
+            normalizedPayload.participant_pubkeys.length > 0
+              ? normalizedPayload.participant_pubkeys
+              : fallbackParticipants;
+
+          applyIfCurrent(roomID, placeTitle, participantPubkeys, {
             transport: "local",
             connectionState: signerAvailable ? "connecting" : "local_preview",
             statusMessage: signerAvailable
@@ -464,8 +516,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           }
 
           try {
-            const tokenResponse = await requestLiveKitToken(payload.room_id);
-            applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+            const tokenResponse = await requestLiveKitToken(roomID);
+            applyIfCurrent(roomID, placeTitle, participantPubkeys, {
               transport: "livekit",
               connectionState: "connecting",
               statusMessage: "Connecting to LiveKit room.",
@@ -483,7 +535,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                 if (requestID !== activeCallRequestRef.current) {
                   return;
                 }
-                syncLiveKitParticipants(payload.room_id, geohash, participants);
+                syncLiveKitParticipants(roomID, geohash, participants);
               },
               onConnectionStatus: (status, message) => {
                 if (requestID !== activeCallRequestRef.current) {
@@ -491,7 +543,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                 }
 
                 setActiveCall((current) =>
-                  current && current.roomID === payload.room_id
+                  current && current.roomID === roomID
                     ? {
                         ...current,
                         transport: status === "connected" ? "livekit" : current.transport,
@@ -544,7 +596,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                   ? error.message
                   : "Media temporarily unavailable.";
 
-            applyIfCurrent(payload.room_id, payload.place_title, payload.participant_pubkeys, {
+            applyIfCurrent(roomID, placeTitle, participantPubkeys, {
               transport: "local",
               connectionState: "failed",
               statusMessage: message
@@ -592,9 +644,42 @@ export function AppStateProvider({ children }: PropsWithChildren) {
             }
           }
 
+          const nextParticipantStates =
+            control === "deafen"
+              ? current.participantStates
+              : (() => {
+                  const existingIndex = current.participantStates.findIndex(
+                    (participant) => participant.pubkey === effectiveCurrentUserPubkey
+                  );
+
+                  if (existingIndex === -1) {
+                    return [
+                      ...current.participantStates,
+                      {
+                        pubkey: effectiveCurrentUserPubkey,
+                        mic: control === "mic" ? nextValue : current.mic,
+                        cam: control === "cam" ? nextValue : current.cam,
+                        screenshare: control === "screenshare" ? nextValue : current.screenshare
+                      }
+                    ];
+                  }
+
+                  return current.participantStates.map((participant) =>
+                    participant.pubkey === effectiveCurrentUserPubkey
+                      ? {
+                          ...participant,
+                          mic: control === "mic" ? nextValue : participant.mic,
+                          cam: control === "cam" ? nextValue : participant.cam,
+                          screenshare: control === "screenshare" ? nextValue : participant.screenshare
+                        }
+                      : participant
+                  );
+                })();
+
           return {
             ...current,
-            [control]: nextValue
+            [control]: nextValue,
+            participantStates: nextParticipantStates
           };
         });
       },
@@ -612,6 +697,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     [
       activeCall,
       currentUser,
+      currentUserPubkeyOverride,
+      effectiveCurrentUserPubkey,
       effectiveFeedSegments,
       effectiveCrossRelayItems,
       effectiveNotes,

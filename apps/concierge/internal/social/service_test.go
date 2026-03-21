@@ -67,20 +67,20 @@ func TestBootstrap(t *testing.T) {
 	})
 
 	t.Run("returns places", func(t *testing.T) {
-		if len(resp.Places) == 0 {
-			t.Error("expected at least one place")
+		if len(resp.Places) != 0 {
+			t.Errorf("expected no bootstrap places, got %d", len(resp.Places))
 		}
 	})
 
 	t.Run("returns profiles", func(t *testing.T) {
-		if len(resp.Profiles) == 0 {
-			t.Error("expected at least one profile")
+		if len(resp.Profiles) != 0 {
+			t.Errorf("expected no bootstrap profiles, got %d", len(resp.Profiles))
 		}
 	})
 
 	t.Run("returns notes", func(t *testing.T) {
-		if len(resp.Notes) == 0 {
-			t.Error("expected at least one note")
+		if len(resp.Notes) != 0 {
+			t.Errorf("expected no bootstrap notes, got %d", len(resp.Notes))
 		}
 	})
 
@@ -91,14 +91,19 @@ func TestBootstrap(t *testing.T) {
 	})
 
 	t.Run("returns cross-relay items", func(t *testing.T) {
-		if len(resp.CrossRelayItems) == 0 {
-			t.Error("expected at least one cross-relay item")
+		if len(resp.CrossRelayItems) != 0 {
+			t.Errorf("expected no bootstrap cross-relay items, got %d", len(resp.CrossRelayItems))
 		}
 	})
 
 	t.Run("returns copy of data", func(t *testing.T) {
+		svc.places = []Place{{Geohash: "9q8yyk", Title: "original"}}
+		svc.crossRelayItems = []CrossRelayFeedItem{{ID: "cross-1", RelayName: "relay"}}
+
+		resp = svc.Bootstrap()
 		resp.Places[0].Title = "modified"
 		resp.CrossRelayItems[0].RelayName = "modified relay"
+
 		resp2 := svc.Bootstrap()
 		if resp2.Places[0].Title == "modified" {
 			t.Error("Bootstrap should return a copy, not a reference")
@@ -306,10 +311,26 @@ func TestResolveCallIntent(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects unknown place", func(t *testing.T) {
-		_, err := svc.ResolveCallIntent("unknown", "npub1caller")
-		if err != ErrUnknownPlace {
-			t.Errorf("expected ErrUnknownPlace, got %v", err)
+	t.Run("creates ad-hoc call intent for unknown place", func(t *testing.T) {
+		intent, err := svc.ResolveCallIntent("9q8yyz", "npub1caller")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if intent.RoomID != "geo:npub1operator:9q8yyz" {
+			t.Fatalf("expected ad-hoc room id, got %s", intent.RoomID)
+		}
+		if intent.PlaceTitle != "Field tile 9q8yyz" {
+			t.Fatalf("expected ad-hoc place title, got %s", intent.PlaceTitle)
+		}
+		if len(intent.ParticipantPubkeys) != 1 || intent.ParticipantPubkeys[0] != "npub1caller" {
+			t.Fatalf("expected caller-only participant list, got %+v", intent.ParticipantPubkeys)
+		}
+	})
+
+	t.Run("rejects empty geohash", func(t *testing.T) {
+		_, err := svc.ResolveCallIntent("", "npub1caller")
+		if err != ErrInvalidGeohash {
+			t.Errorf("expected ErrInvalidGeohash, got %v", err)
 		}
 	})
 }

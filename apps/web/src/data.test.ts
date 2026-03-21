@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildPulseFeedItems,
   type CrossRelayFeedItem,
+  formatPlaceHeading,
   type GeoNote,
   type ParticipantProfile,
   type Place,
@@ -134,6 +135,19 @@ describe("buildPulseFeedItems", () => {
     expect(result[2].id).toBe("pulse-local-note-old"); // 17:00
   });
 
+  it("does not throw when a feed item is missing publishedAt", () => {
+    const remoteItems = [
+      {
+        ...makeCrossRelayItem("remote-missing", "Relay list", "2026-03-18T18:00:00Z"),
+        publishedAt: undefined as unknown as string
+      },
+      makeCrossRelayItem("remote-present", "Direct follow", "2026-03-18T19:00:00Z")
+    ];
+
+    expect(() => buildPulseFeedItems([], [], [], remoteItems)).not.toThrow();
+    expect(buildPulseFeedItems([], [], [], remoteItems)[0].id).toBe("pulse-remote-remote-present");
+  });
+
   it("falls back to pubkey when profile is missing", () => {
     const notes = [makeNote("note-1", "9q8yyk", "npub1unknown", "2026-03-18T18:00:00Z")];
 
@@ -184,5 +198,15 @@ describe("buildPulseFeedItems", () => {
       sourceLabel: "Direct follow",
       whyVisible: "Followed author on configured relay"
     });
+  });
+});
+
+describe("formatPlaceHeading", () => {
+  it("prints the geohash once for fallback field tiles", () => {
+    expect(formatPlaceHeading("Field tile 9q8yyk", "9q8yyk")).toBe("9q8yyk");
+  });
+
+  it("keeps named places paired with their geohash", () => {
+    expect(formatPlaceHeading("Civic plaza", "9q8yyk")).toBe("Civic plaza · 9q8yyk");
   });
 });

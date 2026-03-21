@@ -3,13 +3,11 @@ export const relayName = "Synchrono City Local";
 export const relayURL = "ws://localhost:8080";
 export const currentUserPubkey = "npub1scout";
 
-// Seed data below is a fallback copy of Concierge's seed data.
-// Used when the bootstrap API is unavailable (offline/test mode).
-// Keep in sync with apps/concierge/internal/social/service.go seed data.
-
 export type ParticipantProfile = {
   pubkey: string;
   displayName: string;
+  name?: string;
+  picture?: string;
   role: string;
   status: string;
   bio: string;
@@ -115,6 +113,12 @@ export type CallSession = {
   roomID: string;
   placeTitle: string;
   participantPubkeys: string[];
+  participantStates: Array<{
+    pubkey: string;
+    mic: boolean;
+    cam: boolean;
+    screenshare: boolean;
+  }>;
   transport: "local" | "livekit";
   connectionState: "local_preview" | "connecting" | "connected" | "failed";
   statusMessage: string;
@@ -130,220 +134,50 @@ export type CallSession = {
   minimized: boolean;
 };
 
-export const seedProfiles: ParticipantProfile[] = [
-  {
-    pubkey: currentUserPubkey,
-    displayName: "Field Scout",
-    role: "Local member",
-    status: "Posting place notes and stepping into nearby rooms.",
-    bio: "Tracks live place state, adds operator-facing notes, and joins calls when coordination shifts.",
-    mic: true,
-    cam: false,
-    screenshare: false,
-    deafen: false
-  },
-  {
-    pubkey: "npub1aurora",
-    displayName: "Aurora Vale",
-    role: "Tenant organizer",
-    status: "Coordinating arrival updates from the east stairs.",
-    bio: "Runs block-level organizing threads and keeps the sunset meetups on schedule.",
-    homeGeohash: "9q8yyk",
-    mic: true,
-    cam: false,
-    screenshare: false,
-    deafen: false
-  },
-  {
-    pubkey: "npub1jules",
-    displayName: "Jules Mercer",
-    role: "Neighborhood volunteer",
-    status: "Sharing supply counts and street-level accessibility notes.",
-    bio: "Tracks turnout and accessibility changes for public gatherings.",
-    homeGeohash: "9q8yyk",
-    mic: true,
-    cam: true,
-    screenshare: false,
-    deafen: false
-  },
-  {
-    pubkey: "npub1sol",
-    displayName: "Sol Marin",
-    role: "Event host",
-    status: "Pinned on the plaza room and routing newcomers.",
-    bio: "Hosts pop-up conversations and keeps the plaza room active.",
-    homeGeohash: "9q8yyk",
-    mic: false,
-    cam: true,
-    screenshare: true,
-    deafen: false
-  },
-  {
-    pubkey: "npub1mika",
-    displayName: "Mika Hart",
-    role: "Venue lead",
-    status: "Moving the afterparty indoors and updating room logistics.",
-    bio: "Coordinates venue operations when activity shifts between tiles.",
-    homeGeohash: "9q8yym",
-    mic: true,
-    cam: false,
-    screenshare: false,
-    deafen: true
-  },
-  {
-    pubkey: "npub1river",
-    displayName: "River Stone",
-    role: "Audio host",
-    status: "Keeping the room open for late arrivals.",
-    bio: "Maintains lightweight audio rooms after the public note stack slows down.",
-    homeGeohash: "9q8yyt",
-    mic: true,
-    cam: false,
-    screenshare: false,
-    deafen: false
-  },
-  {
-    pubkey: "npub1nox",
-    displayName: "Nox Reed",
-    role: "Field reporter",
-    status: "Watching for overflow from the next tile over.",
-    bio: "Posts quick context notes when gatherings spill into nearby blocks.",
-    homeGeohash: "9q8yyt",
+export function createFallbackCurrentUser(pubkey = currentUserPubkey): ParticipantProfile {
+  return {
+    pubkey,
+    displayName: "Current session",
+    name: "Current session",
+    role: "No relay profile loaded",
+    status: "This client has not received a participant profile yet.",
+    bio: "",
     mic: false,
     cam: false,
     screenshare: false,
     deafen: false
-  }
-];
+  };
+}
 
-export const seedPlaces: Place[] = [
-  {
-    geohash: "9q8yyk",
-    title: "Civic plaza",
-    neighborhood: "Market steps",
-    description:
-      "A public square for turnout coordination, accessibility updates, and live town-hall spillover.",
-    activitySummary: "Tenant organizing thread with a pinned logistics note and a live room.",
-    tags: ["assembly", "accessibility", "civic"],
-    capacity: 8,
-    occupantPubkeys: ["npub1aurora", "npub1jules", "npub1sol"],
-    unread: true,
-    pinnedNoteId: "note-plaza-pinned"
-  },
-  {
-    geohash: "9q8yym",
-    title: "Warehouse annex",
-    neighborhood: "Harbor side",
-    description:
-      "An indoor fallback place for venue logistics, check-in flow, and overflow audio coordination.",
-    activitySummary: "The venue lead moved the afterparty indoors and is guiding arrivals.",
-    tags: ["venue", "logistics", "overflow"],
-    capacity: 6,
-    occupantPubkeys: ["npub1mika"],
-    unread: false
-  },
-  {
-    geohash: "9q8yyt",
-    title: "Audio fallback",
-    neighborhood: "Transit corridor",
-    description:
-      "A low-friction audio place that stays open even when note traffic drops to zero.",
-    activitySummary: "Late arrivals are using the room as a rendezvous channel.",
-    tags: ["audio", "late-night", "fallback"],
-    capacity: 6,
-    occupantPubkeys: ["npub1river", "npub1nox"],
-    unread: true
-  }
-];
-
-export const seedNotes: GeoNote[] = [
-  {
-    id: "note-plaza-pinned",
-    geohash: "9q8yyk",
-    authorPubkey: "npub1aurora",
-    content: "Sunset meetup is shifting to the east stairs.",
-    createdAt: "2026-03-18T18:20:00Z",
-    replies: 4
-  },
-  {
-    id: "note-plaza-access",
-    geohash: "9q8yyk",
-    authorPubkey: "npub1jules",
-    content: "North gate is clear again. Wheelchair route is the left ramp.",
-    createdAt: "2026-03-18T18:08:00Z",
-    replies: 2
-  },
-  {
-    id: "note-plaza-stream",
-    geohash: "9q8yyk",
-    authorPubkey: "npub1sol",
-    content: "Screenshare is live for anyone still walking over.",
-    createdAt: "2026-03-18T17:58:00Z",
-    replies: 1
-  },
-  {
-    id: "note-annex-move",
-    geohash: "9q8yym",
-    authorPubkey: "npub1mika",
-    content: "Afterparty moved indoors. Audio room is live.",
-    createdAt: "2026-03-18T18:15:00Z",
-    replies: 3
-  },
-  {
-    id: "note-annex-checkin",
-    geohash: "9q8yym",
-    authorPubkey: "npub1mika",
-    content: "Check in at the alley entrance. Capacity is stable for now.",
-    createdAt: "2026-03-18T17:50:00Z",
-    replies: 0
-  },
-  {
-    id: "note-audio-rollcall",
-    geohash: "9q8yyt",
-    authorPubkey: "npub1river",
-    content: "No new notes, but the room is still occupied.",
-    createdAt: "2026-03-18T18:05:00Z",
-    replies: 1
-  }
-];
-
-export const feedSegments: FeedSegment[] = [
-  { name: "Following", description: "Explainable projection of followed authors." },
-  { name: "Local", description: "Public events carried by the active relay." },
-  { name: "For You", description: "Concierge-produced merge across relays and follows." }
-];
-
-export const crossRelayFeedItems: CrossRelayFeedItem[] = [
-  {
-    id: "cross-relay-plaza",
-    relayName: "Mission Mesh",
-    relayUrl: "wss://mission-mesh.example/relay",
-    authorPubkey: "npub1tala",
-    authorName: "Tala North",
-    geohash: "9q8yyk",
-    placeTitle: "Civic plaza",
-    content: "March overflow is heading for the east stairs. Keep the plaza audio room open for late arrivals.",
-    publishedAt: "2026-03-18T18:12:00Z",
-    sourceLabel: "Direct follow",
-    whyVisible: "Followed author on a configured relay is posting about the same public tile."
-  },
-  {
-    id: "cross-relay-annex",
-    relayName: "Harbor Dispatch",
-    relayUrl: "wss://harbor-dispatch.example/relay",
-    authorPubkey: "npub1ines",
-    authorName: "Ines Park",
-    geohash: "9q8yym",
-    placeTitle: "Warehouse annex",
-    content: "Venue queue is clear from the alley entrance. Remote listeners are joining the annex room from two relays.",
-    publishedAt: "2026-03-18T18:06:00Z",
-    sourceLabel: "Relay list",
-    whyVisible: "Configured relay surfaced a matching logistics thread for an active local place."
-  }
-];
+export function createFallbackParticipantProfile(pubkey: string): ParticipantProfile {
+  return {
+    pubkey,
+    displayName: "",
+    role: "Participant",
+    status: "LiveKit participant metadata is unavailable.",
+    bio: "",
+    mic: false,
+    cam: false,
+    screenshare: false,
+    deafen: false
+  };
+}
 
 export function resolveRoomID(geohash: string, operatorPubkey = relayOperatorPubkey) {
   return `geo:${operatorPubkey}:${geohash}`;
+}
+
+export function compareDescendingTimestamps(left?: string, right?: string) {
+  if (left && right) {
+    return right.localeCompare(left);
+  }
+  if (right) {
+    return 1;
+  }
+  if (left) {
+    return -1;
+  }
+  return 0;
 }
 
 export function createEphemeralPlace(geohash: string): Place {
@@ -353,15 +187,30 @@ export function createEphemeralPlace(geohash: string): Place {
     neighborhood: "Ad hoc presence",
     description: "No operator-defined place exists for this tile yet.",
     activitySummary: "Presence was set directly from a map click.",
-    tags: ["ad-hoc", "geohash6"],
+    tags: ["ad-hoc", "geohash7"],
     capacity: 8,
     occupantPubkeys: [],
     unread: false
   };
 }
 
+export function formatPlaceHeading(title: string, geohash: string) {
+  const trimmedTitle = title.trim();
+  const trimmedGeohash = geohash.trim();
+
+  if (!trimmedTitle) {
+    return trimmedGeohash;
+  }
+
+  if (trimmedTitle === trimmedGeohash || trimmedTitle === `Field tile ${trimmedGeohash}`) {
+    return trimmedGeohash;
+  }
+
+  return `${trimmedTitle} · ${trimmedGeohash}`;
+}
+
 export function sortNotesByRecency(notes: GeoNote[]) {
-  return [...notes].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return [...notes].sort((left, right) => compareDescendingTimestamps(left.createdAt, right.createdAt));
 }
 
 export function listNotesForPlace(notes: GeoNote[], geohash: string) {
@@ -407,7 +256,7 @@ export function buildRelaySyntheses(places: Place[], notes: GeoNote[]): RelaySyn
       } satisfies RelaySynthesis;
     })
     .filter((entry): entry is RelaySynthesis => Boolean(entry))
-    .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+    .sort((left, right) => compareDescendingTimestamps(left.generatedAt, right.generatedAt));
 }
 
 export function buildParticipantMap(profiles: ParticipantProfile[]) {
@@ -567,7 +416,7 @@ export function buildPulseFeedItems(
   }));
 
   return [...localItems, ...crossRelayFeed].sort((left, right) =>
-    right.publishedAt.localeCompare(left.publishedAt)
+    compareDescendingTimestamps(left.publishedAt, right.publishedAt)
   );
 }
 
