@@ -47,6 +47,8 @@ if [ -f ".env.docker" ]; then
     echo -e "${GREEN}✓ Backed up existing .env.docker to .env.docker.backup${NC}"
 fi
 
+COMPOSE_CMD=(docker compose --env-file .env.docker)
+
 # Generate random hex string
 generate_hex() {
     local length=$1
@@ -163,7 +165,7 @@ echo
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     echo ""
     echo -e "${BLUE}Building and starting services...${NC}"
-    docker compose up -d --build
+    "${COMPOSE_CMD[@]}" up -d --build
 
     echo ""
     echo -e "${GREEN}✓ Synchrono City is starting!${NC}"
@@ -181,12 +183,12 @@ if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     echo -e "  3. Access admin at ${GREEN}http://localhost:5173/app/settings${NC}"
     echo ""
     echo -e "Useful commands:"
-    echo -e "  ${GREEN}docker compose logs -f${NC}     Follow all logs"
-    echo -e "  ${GREEN}docker compose logs -f concierge${NC}  Follow concierge logs"
-    echo -e "  ${GREEN}docker compose down${NC}       Stop all services"
-    echo -e "  ${GREEN}docker compose up -d${NC}       Start services again"
+    echo -e "  ${GREEN}${COMPOSE_CMD[*]} logs -f${NC}     Follow all logs"
+    echo -e "  ${GREEN}${COMPOSE_CMD[*]} logs -f concierge${NC}  Follow concierge logs"
+    echo -e "  ${GREEN}${COMPOSE_CMD[*]} down${NC}       Stop all services"
+    echo -e "  ${GREEN}${COMPOSE_CMD[*]} up -d${NC}       Start services again"
 else
     echo ""
     echo -e "${GREEN}Configuration complete!${NC}"
-    echo -e "Run ${GREEN}docker compose up -d${NC} to start when ready."
+    echo -e "Run ${GREEN}${COMPOSE_CMD[*]} up -d${NC} to start when ready."
 fi

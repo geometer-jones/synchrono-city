@@ -4,6 +4,9 @@ import {
   type CrossRelayFeedItem,
   formatPlaceHeading,
   type GeoNote,
+  isBeaconThreadNote,
+  listPulseLocalNotes,
+  listNotesForPlace,
   type ParticipantProfile,
   type Place,
   type PulseFeedItem
@@ -75,8 +78,8 @@ describe("buildPulseFeedItems", () => {
   });
 
   it("maps local notes to Local lane with local=true", () => {
-    const places = [makePlace("9q8yyk", "Civic plaza")];
-    const notes = [makeNote("note-1", "9q8yyk", "npub1test", "2026-03-18T18:00:00Z")];
+    const places: Place[] = [];
+    const notes = [makeNote("note-1", "9q8zzz", "npub1test", "2026-03-18T18:00:00Z")];
     const profiles = [makeProfile("npub1test", "Test Author")];
 
     const result = buildPulseFeedItems(places, notes, profiles, []);
@@ -89,8 +92,15 @@ describe("buildPulseFeedItems", () => {
       local: true,
       noteId: "note-1",
       authorName: "Test Author",
-      placeTitle: "Civic plaza"
+      placeTitle: "9q8zzz"
     });
+  });
+
+  it("excludes beacon-thread local notes from Pulse", () => {
+    const places = [makePlace("9q8yyk", "Civic plaza")];
+    const notes = [makeNote("note-1", "9q8yyk", "npub1test", "2026-03-18T18:00:00Z")];
+
+    expect(buildPulseFeedItems(places, notes, [], [])).toEqual([]);
   });
 
   it("maps cross-relay items with Direct follow to Following lane", () => {
@@ -208,5 +218,38 @@ describe("formatPlaceHeading", () => {
 
   it("keeps named places paired with their geohash", () => {
     expect(formatPlaceHeading("Civic plaza", "9q8yyk")).toBe("Civic plaza · 9q8yyk");
+  });
+});
+
+describe("listNotesForPlace", () => {
+  it("sorts mixed-precision ISO timestamps by actual recency", () => {
+    const notes = [
+      makeNote("note-seconds", "9q8yyk", "npub1test", "2026-03-18T18:30:00Z"),
+      makeNote("note-millis", "9q8yyk", "npub1test", "2026-03-18T18:30:00.123Z")
+    ];
+
+    expect(listNotesForPlace(notes, "9q8yyk").map((note) => note.id)).toEqual([
+      "note-millis",
+      "note-seconds"
+    ]);
+  });
+});
+
+describe("Pulse note boundaries", () => {
+  it("identifies notes tied to known beacons", () => {
+    const places = [makePlace("9q8yyk", "Civic plaza")];
+
+    expect(isBeaconThreadNote(makeNote("note-1", "9q8yyk", "npub1test", "2026-03-18T18:00:00Z"), places)).toBe(true);
+    expect(isBeaconThreadNote(makeNote("note-2", "9q8zzz", "npub1test", "2026-03-18T18:00:00Z"), places)).toBe(false);
+  });
+
+  it("keeps only non-beacon local notes in Pulse selectors", () => {
+    const places = [makePlace("9q8yyk", "Civic plaza")];
+    const notes = [
+      makeNote("beacon-note", "9q8yyk", "npub1test", "2026-03-18T18:00:00Z"),
+      makeNote("public-note", "9q8zzz", "npub1test", "2026-03-18T19:00:00Z")
+    ];
+
+    expect(listPulseLocalNotes(places, notes).map((note) => note.id)).toEqual(["public-note"]);
   });
 });

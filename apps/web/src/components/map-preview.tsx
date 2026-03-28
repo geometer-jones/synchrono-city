@@ -1,23 +1,37 @@
-import { useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
+import { useEffect, useMemo, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
 
-type PlaceTile = {
+type MapTile = {
   geohash: string;
-  title: string;
+  name?: string;
+  title?: string;
   roomID: string;
   latestNote: string;
   noteCount: number;
   participants: string[];
+  avatarUrl?: string;
+  live?: boolean;
 };
 
 type MapPreviewProps = {
-  tiles: PlaceTile[];
+  tiles: MapTile[];
   selectedGeohash?: string;
+  focusRequestKey?: string;
   activeGeohash?: string | null;
+  pendingGeohash?: string;
   onSelectTile?: (geohash: string) => void;
+  onBackgroundSelectTile?: (geohash: string) => void;
+  markerCards?: Array<{
+    geohash: string;
+    ariaLabel?: string;
+    content: ReactNode;
+  }>;
 };
 
 type MapboxModule = typeof import("mapbox-gl");
 type MapboxMap = InstanceType<MapboxModule["default"]["Map"]>;
+type MapInteractionTarget = {
+  dispatchEvent: (event: Event) => boolean;
+};
 
 const hasMapboxConfig = Boolean(
   import.meta.env.VITE_MAPBOX_ACCESS_TOKEN && import.meta.env.VITE_MAPBOX_STYLE_URL
@@ -33,19 +47,149 @@ const markerPositions = [
 ] as const;
 
 const mapSourceID = "place-tiles";
-const clusterCircleLayerID = "place-clusters";
-const clusterCountLayerID = "place-cluster-count";
-const pointCircleLayerID = "place-points";
-const pointCountLayerID = "place-point-count";
 const geohashBase32 = "0123456789bcdefghjkmnpqrstuvwxyz";
+const defaultGeohashPrecision = 8;
+const defaultMapCenter: [number, number] = [-122.4194, 37.7749];
+const defaultMapZoom = 11.5;
+const mapViewportStorageKey = "synchrono-city.world-map.viewport.v1";
 
 type MapDataSource = {
   setData: (data: unknown) => void;
-  getClusterExpansionZoom?: (
-    clusterId: number,
-    callback: (error: Error | null, zoom?: number | null) => void
-  ) => void;
 };
+
+type MarkerCardPlacement = {
+  left: string;
+  top: string;
+};
+
+type MarkerPlacement = {
+  left: string;
+  top: string;
+};
+
+type StoredMapViewport = {
+  bounds: {
+    east: number;
+    north: number;
+    south: number;
+    west: number;
+  };
+  center: [number, number];
+  zoom: number;
+};
+
+const pairLayerStride = 3;
+
+function isFiniteCoordinate(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function loadStoredMapViewport(): StoredMapViewport | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(mapViewportStorageKey);
+    if (!rawValue) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawValue) as Partial<StoredMapViewport> | null;
+    const center = parsed?.center;
+    const bounds = parsed?.bounds;
+
+    if (
+      !Array.isArray(center) ||
+      center.length !== 2 ||
+      !isFiniteCoordinate(center[0]) ||
+      !isFiniteCoordinate(center[1]) ||
+      !isFiniteCoordinate(parsed?.zoom) ||
+      !bounds ||
+      !isFiniteCoordinate(bounds.west) ||
+      !isFiniteCoordinate(bounds.south) ||
+      !isFiniteCoordinate(bounds.east) ||
+      !isFiniteCoordinate(bounds.north)
+    ) {
+      return null;
+    }
+
+    return {
+      center: [center[0], center[1]],
+      zoom: parsed.zoom,
+      bounds: {
+        west: bounds.west,
+        south: bounds.south,
+        east: bounds.east,
+        north: bounds.north
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveMapViewport(map: MapboxMap) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const center = map.getCenter();
+    const bounds = map.getBounds();
+    if (!bounds) {
+      return;
+    }
+
+    const nextViewport: StoredMapViewport = {
+      center: [center.lng, center.lat],
+      zoom: map.getZoom(),
+      bounds: {
+        west: bounds.getWest(),
+        south: bounds.getSouth(),
+        east: bounds.getEast(),
+        north: bounds.getNorth()
+      }
+    };
+
+    window.localStorage.setItem(mapViewportStorageKey, JSON.stringify(nextViewport));
+  } catch {
+    // Ignore storage failures so map interaction continues.
+  }
+}
+
+function isScrollableOverflow(value: string) {
+  return value === "auto" || value === "scroll" || value === "overlay";
+}
+
+function canConsumeWheelEvent(target: EventTarget | null, currentTarget: HTMLElement, deltaY: number) {
+  if (!(target instanceof HTMLElement) || deltaY === 0) {
+    return false;
+  }
+
+  let element: HTMLElement | null = target;
+
+  while (element) {
+    const overflowY = window.getComputedStyle(element).overflowY;
+    const maxScrollTop = element.scrollHeight - element.clientHeight;
+
+    if (
+      isScrollableOverflow(overflowY) &&
+      maxScrollTop > 0 &&
+      ((deltaY < 0 && element.scrollTop > 0) || (deltaY > 0 && element.scrollTop < maxScrollTop))
+    ) {
+      return true;
+    }
+
+    if (element === currentTarget) {
+      break;
+    }
+
+    element = element.parentElement;
+  }
+
+  return false;
+}
 
 function decodeGeohashCenter(geohash: string): [number, number] | null {
   let evenBit = true;
@@ -81,7 +225,7 @@ function decodeGeohashCenter(geohash: string): [number, number] | null {
   return [(longitude[0] + longitude[1]) / 2, (latitude[0] + latitude[1]) / 2];
 }
 
-function encodeGeohash(longitude: number, latitude: number, precision = 6) {
+function encodeGeohash(longitude: number, latitude: number, precision = defaultGeohashPrecision) {
   let geohash = "";
   let bit = 0;
   let characterValue = 0;
@@ -124,14 +268,13 @@ function encodeGeohash(longitude: number, latitude: number, precision = 6) {
 }
 
 function buildFeatureCollection(
-  tiles: PlaceTile[],
+  tiles: MapTile[],
   selectedGeohash?: string,
   activeGeohash?: string | null
 ) {
   return {
     type: "FeatureCollection" as const,
     features: tiles
-      .filter((tile) => tile.noteCount > 0 || tile.participants.length > 0)
       .map((tile) => {
         const center = decodeGeohashCenter(tile.geohash);
         if (!center) {
@@ -146,7 +289,7 @@ function buildFeatureCollection(
           },
           properties: {
             geohash: tile.geohash,
-            title: tile.title,
+            title: tile.name ?? tile.title ?? tile.geohash,
             noteCount: tile.noteCount,
             liveCount: tile.participants.length,
             isSelected: tile.geohash === selectedGeohash,
@@ -162,133 +305,66 @@ function ensureMapLayers(mapboxgl: MapboxModule["default"], map: MapboxMap) {
   if (!map.getSource(mapSourceID)) {
     map.addSource(mapSourceID, {
       type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-      cluster: true,
-      clusterRadius: 56,
-      clusterMaxZoom: 13,
-      clusterProperties: {
-        noteSum: ["+", ["get", "noteCount"]],
-        liveSum: ["+", ["get", "liveCount"]]
-      }
+      data: { type: "FeatureCollection", features: [] }
     });
+  }
+}
+
+function getFallbackPlacement(tiles: MapTile[], geohash: string): MarkerCardPlacement | null {
+  const visibleTiles = tiles;
+  const index = visibleTiles.findIndex((tile) => tile.geohash === geohash);
+  if (index < 0) {
+    return null;
   }
 
-  if (!map.getLayer(clusterCircleLayerID)) {
-    map.addLayer({
-      id: clusterCircleLayerID,
-      type: "circle",
-      source: mapSourceID,
-      filter: ["has", "point_count"],
-      paint: {
-        "circle-color": [
-          "case",
-          [">", ["coalesce", ["get", "liveSum"], 0], 0],
-          "#2e8f6d",
-          "#de5d3d"
-        ],
-        "circle-radius": [
-          "interpolate",
-          ["linear"],
-          ["coalesce", ["get", "noteSum"], 0],
-          0,
-          22,
-          4,
-          26,
-          12,
-          32
-        ],
-        "circle-stroke-color": "rgba(246, 243, 234, 0.78)",
-        "circle-stroke-width": 1.5
-      }
-    });
+  const position = markerPositions[index % markerPositions.length];
+  return {
+    top: `calc(${position.top} + 23px)`,
+    left: `calc(${position.left} + 23px)`
+  };
+}
+
+function getFallbackMarkerPlacements(tiles: MapTile[]) {
+  const visibleTiles = tiles;
+
+  return Object.fromEntries(
+    visibleTiles.map((tile, index) => {
+      const position = markerPositions[index % markerPositions.length];
+      return [
+        tile.geohash,
+        {
+          top: `calc(${position.top} + 23px)`,
+          left: `calc(${position.left} + 23px)`
+        } satisfies MarkerPlacement
+      ];
+    })
+  ) as Record<string, MarkerPlacement>;
+}
+
+function buildPairLayers(visibleTiles: MapTile[]) {
+  return Object.fromEntries(visibleTiles.map((tile, index) => [tile.geohash, index + 1])) as Record<string, number>;
+}
+
+function arePairLayersEqual(left: Record<string, number>, right: Record<string, number>) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
   }
 
-  if (!map.getLayer(clusterCountLayerID)) {
-    map.addLayer({
-      id: clusterCountLayerID,
-      type: "symbol",
-      source: mapSourceID,
-      filter: ["has", "point_count"],
-      layout: {
-        "text-field": ["to-string", ["coalesce", ["get", "noteSum"], 0]],
-        "text-size": 13,
-        "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"]
-      },
-      paint: {
-        "text-color": "#f6f3ea"
-      }
-    });
-  }
-
-  if (!map.getLayer(pointCircleLayerID)) {
-    map.addLayer({
-      id: pointCircleLayerID,
-      type: "circle",
-      source: mapSourceID,
-      filter: ["!", ["has", "point_count"]],
-      paint: {
-        "circle-color": [
-          "case",
-          ["get", "isSelected"],
-          "#f6f3ea",
-          [">", ["coalesce", ["get", "liveCount"], 0], 0],
-          "#f6a56f",
-          "#de5d3d"
-        ],
-        "circle-radius": [
-          "case",
-          ["get", "isSelected"],
-          34,
-          31
-        ],
-        "circle-stroke-color": [
-          "case",
-          ["get", "isSelected"],
-          "#ffffff",
-          [">", ["coalesce", ["get", "liveCount"], 0], 0],
-          "#67d69e",
-          "rgba(246, 243, 234, 0.46)"
-        ],
-        "circle-stroke-width": [
-          "case",
-          ["get", "isSelected"],
-          3,
-          [">", ["coalesce", ["get", "liveCount"], 0], 0],
-          2,
-          1.25
-        ]
-      }
-    });
-  }
-
-  if (!map.getLayer(pointCountLayerID)) {
-    map.addLayer({
-      id: pointCountLayerID,
-      type: "symbol",
-      source: mapSourceID,
-      filter: ["!", ["has", "point_count"]],
-      layout: {
-        "text-field": ["to-string", ["get", "noteCount"]],
-        "text-size": 13,
-        "text-font": ["Open Sans Bold", "Arial Unicode MS Bold"]
-      },
-      paint: {
-        "text-color": [
-          "case",
-          ["get", "isSelected"],
-          "#091018",
-          "#091018"
-        ]
-      }
-    });
-  }
+  return leftKeys.every((key) => left[key] === right[key]);
 }
 
 export function MapPreview({
   tiles,
   selectedGeohash,
+  focusRequestKey,
   activeGeohash,
+  pendingGeohash,
   onSelectTile,
+  onBackgroundSelectTile,
+  markerCards,
   children
 }: PropsWithChildren<MapPreviewProps>) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -296,16 +372,106 @@ export function MapPreview({
   const mapboxRef = useRef<MapboxModule["default"] | null>(null);
   const mapLoadedRef = useRef(false);
   const fittedBoundsRef = useRef(false);
+  const onSelectTileRef = useRef(onSelectTile);
+  const onBackgroundSelectTileRef = useRef(onBackgroundSelectTile);
+  const pendingGeohashRef = useRef(pendingGeohash);
+  const markerCardsRef = useRef(markerCards);
+  const updateMarkerCardPlacementsRef = useRef<() => void>(() => {});
+  const updateMarkerPlacementsRef = useRef<() => void>(() => {});
+  const updatePendingPlacementRef = useRef<() => void>(() => {});
+  const visibleTiles = useMemo(() => tiles, [tiles]);
   const [mapError, setMapError] = useState<string | null>(null);
-
-  const visibleTiles = useMemo(
-    () => tiles.filter((tile) => tile.noteCount > 0 || tile.participants.length > 0),
-    [tiles]
+  const [markerCardPlacements, setMarkerCardPlacements] = useState<Record<string, MarkerCardPlacement>>({});
+  const [markerPlacements, setMarkerPlacements] = useState<Record<string, MarkerPlacement>>({});
+  const [pendingPlacement, setPendingPlacement] = useState<MarkerPlacement | null>(null);
+  const [pairLayers, setPairLayers] = useState<Record<string, number>>(() => buildPairLayers(visibleTiles));
+  const visibleTilesRef = useRef(visibleTiles);
+  const visibleMarkerCards = useMemo(
+    () =>
+      (markerCards ?? []).filter((card) =>
+        visibleTiles.some((tile) => tile.geohash === card.geohash)
+      ),
+    [markerCards, visibleTiles]
   );
   const featureCollection = useMemo(
     () => buildFeatureCollection(tiles, selectedGeohash, activeGeohash),
     [tiles, selectedGeohash, activeGeohash]
   );
+  const featureCollectionRef = useRef(featureCollection);
+  const selectedViewportFocusSignatureRef = useRef<string | null>(null);
+  const [mapReady, setMapReady] = useState(false);
+
+  useEffect(() => {
+    onSelectTileRef.current = onSelectTile;
+  }, [onSelectTile]);
+
+  useEffect(() => {
+    onBackgroundSelectTileRef.current = onBackgroundSelectTile;
+  }, [onBackgroundSelectTile]);
+
+  useEffect(() => {
+    pendingGeohashRef.current = pendingGeohash;
+  }, [pendingGeohash]);
+
+  useEffect(() => {
+    markerCardsRef.current = visibleMarkerCards;
+  }, [visibleMarkerCards]);
+
+  useEffect(() => {
+    visibleTilesRef.current = visibleTiles;
+  }, [visibleTiles]);
+
+  useEffect(() => {
+    featureCollectionRef.current = featureCollection;
+  }, [featureCollection]);
+
+  useEffect(() => {
+    setPairLayers((current) => {
+      const next: Record<string, number> = {};
+      let maxLayer = 0;
+
+      for (const tile of visibleTiles) {
+        const existingLayer = current[tile.geohash];
+        if (existingLayer == null) {
+          continue;
+        }
+
+        next[tile.geohash] = existingLayer;
+        maxLayer = Math.max(maxLayer, existingLayer);
+      }
+
+      for (const tile of visibleTiles) {
+        if (next[tile.geohash] != null) {
+          continue;
+        }
+
+        maxLayer += 1;
+        next[tile.geohash] = maxLayer;
+      }
+
+      return arePairLayersEqual(current, next) ? current : next;
+    });
+  }, [visibleTiles]);
+
+  useEffect(() => {
+    if (shouldLoadMapbox) {
+      return;
+    }
+
+    setMarkerPlacements(getFallbackMarkerPlacements(tiles));
+    setPendingPlacement(pendingGeohash ? getFallbackPendingPlacement(pendingGeohash) : null);
+
+    const placements = Object.fromEntries(
+      visibleMarkerCards
+        .map((card) => {
+          const placement = getFallbackPlacement(tiles, card.geohash);
+          return placement ? [card.geohash, placement] : null;
+        })
+        .filter((entry): entry is [string, MarkerCardPlacement] => Boolean(entry))
+    );
+
+    setMarkerCardPlacements(placements);
+  }, [pendingGeohash, tiles, visibleMarkerCards]);
 
   useEffect(() => {
     if (!shouldLoadMapbox || !containerRef.current || mapRef.current) {
@@ -313,6 +479,8 @@ export function MapPreview({
     }
 
     let cancelled = false;
+    let resizeFrame = 0;
+    let resizeObserver: ResizeObserver | null = null;
 
     void import("mapbox-gl")
       .then(({ default: mapboxgl }) => {
@@ -323,59 +491,104 @@ export function MapPreview({
         setMapError(null);
         mapboxRef.current = mapboxgl;
         mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+        const storedViewport = loadStoredMapViewport();
 
         const map = new mapboxgl.Map({
           container: containerRef.current,
           style: import.meta.env.VITE_MAPBOX_STYLE_URL,
-          center: [-122.4194, 37.7749],
-          zoom: 11.5,
+          center: storedViewport?.center ?? defaultMapCenter,
+          zoom: storedViewport?.zoom ?? defaultMapZoom,
           attributionControl: false
         });
 
         mapRef.current = map;
+        fittedBoundsRef.current = Boolean(storedViewport);
 
-        const handlePointSelect = (event: mapboxgl.MapMouseEvent & { features?: mapboxgl.MapboxGeoJSONFeature[] }) => {
-          const geohash = event.features?.[0]?.properties?.geohash;
-          if (typeof geohash === "string") {
-            onSelectTile?.(geohash);
-          }
-        };
-
-        const handleClusterSelect = async (
-          event: mapboxgl.MapMouseEvent & { features?: mapboxgl.MapboxGeoJSONFeature[] }
-        ) => {
-          const clusterID = event.features?.[0]?.properties?.cluster_id;
-          if (clusterID === undefined) {
-            return;
-          }
-
-          const source = map.getSource(mapSourceID) as MapDataSource | undefined;
-          if (!source || !source.getClusterExpansionZoom) {
-            return;
-          }
-
-          source.getClusterExpansionZoom(Number(clusterID), (error, zoom) => {
-            if (error || zoom == null) {
-              return;
-            }
-
-            map.easeTo({
-              center: (event.features?.[0]?.geometry as GeoJSON.Point).coordinates as [number, number],
-              zoom
+        if (typeof ResizeObserver === "function") {
+          resizeObserver = new ResizeObserver(() => {
+            window.cancelAnimationFrame(resizeFrame);
+            resizeFrame = window.requestAnimationFrame(() => {
+              map.resize();
             });
           });
+          resizeObserver.observe(containerRef.current);
+        }
+
+        const updateMarkerPlacements = () => {
+          const nextPlacements: Record<string, MarkerPlacement> = {};
+
+          for (const tile of visibleTilesRef.current) {
+            const center = decodeGeohashCenter(tile.geohash);
+            if (!center) {
+              continue;
+            }
+
+            const point = map.project(center as [number, number]);
+            nextPlacements[tile.geohash] = {
+              left: `${point.x}px`,
+              top: `${point.y}px`
+            };
+          }
+
+          setMarkerPlacements(nextPlacements);
         };
 
-        const handleBackgroundClick = (event: mapboxgl.MapMouseEvent) => {
-          const features = map.queryRenderedFeatures(event.point, {
-            layers: [clusterCircleLayerID, clusterCountLayerID, pointCircleLayerID, pointCountLayerID]
-          });
-          if (features.length > 0) {
+        const updateMarkerCardPlacements = () => {
+          if (!containerRef.current || markerCardsRef.current == null) {
+            setMarkerCardPlacements({});
             return;
           }
 
-          const geohash = encodeGeohash(event.lngLat.lng, event.lngLat.lat, 6);
-          onSelectTile?.(geohash);
+          const nextPlacements: Record<string, MarkerCardPlacement> = {};
+
+          for (const card of markerCardsRef.current) {
+            const center = decodeGeohashCenter(card.geohash);
+            if (!center) {
+              continue;
+            }
+
+            const point = map.project(center as [number, number]);
+            nextPlacements[card.geohash] = {
+              left: `${point.x}px`,
+              top: `${point.y}px`
+            };
+          }
+
+          setMarkerCardPlacements(nextPlacements);
+        };
+
+        const updatePendingPlacement = () => {
+          const geohash = pendingGeohashRef.current?.trim();
+          if (!geohash) {
+            setPendingPlacement(null);
+            return;
+          }
+
+          const center = decodeGeohashCenter(geohash);
+          if (!center) {
+            setPendingPlacement(null);
+            return;
+          }
+
+          const point = map.project(center as [number, number]);
+          setPendingPlacement({
+            left: `${point.x}px`,
+            top: `${point.y}px`
+          });
+        };
+
+        updateMarkerPlacementsRef.current = updateMarkerPlacements;
+        updateMarkerCardPlacementsRef.current = updateMarkerCardPlacements;
+        updatePendingPlacementRef.current = updatePendingPlacement;
+
+        const handleBackgroundClick = (event: mapboxgl.MapMouseEvent) => {
+          fittedBoundsRef.current = true;
+          const geohash = encodeGeohash(event.lngLat.lng, event.lngLat.lat, defaultGeohashPrecision);
+          if (onBackgroundSelectTileRef.current) {
+            onBackgroundSelectTileRef.current(geohash);
+            return;
+          }
+          onSelectTileRef.current?.(geohash);
         };
 
         const setPointerCursor = () => {
@@ -386,29 +599,34 @@ export function MapPreview({
           map.getCanvas().style.cursor = "";
         };
 
+        const persistViewport = () => {
+          saveMapViewport(map);
+        };
+
         map.on("load", () => {
           if (cancelled) {
             return;
           }
 
           mapLoadedRef.current = true;
+          setMapReady(true);
           ensureMapLayers(mapboxgl, map);
           const source = map.getSource(mapSourceID) as MapDataSource;
-          source.setData(featureCollection);
+          source.setData(featureCollectionRef.current);
+          updateMarkerPlacements();
+          updateMarkerCardPlacements();
+          updatePendingPlacement();
 
-          map.on("click", pointCircleLayerID, handlePointSelect);
-          map.on("click", pointCountLayerID, handlePointSelect);
-          map.on("click", clusterCircleLayerID, handleClusterSelect);
-          map.on("click", clusterCountLayerID, handleClusterSelect);
           map.on("click", handleBackgroundClick);
-          map.on("mouseenter", pointCircleLayerID, setPointerCursor);
-          map.on("mouseleave", pointCircleLayerID, resetPointerCursor);
-          map.on("mouseenter", pointCountLayerID, setPointerCursor);
-          map.on("mouseleave", pointCountLayerID, resetPointerCursor);
-          map.on("mouseenter", clusterCircleLayerID, setPointerCursor);
-          map.on("mouseleave", clusterCircleLayerID, resetPointerCursor);
-          map.on("mouseenter", clusterCountLayerID, setPointerCursor);
-          map.on("mouseleave", clusterCountLayerID, resetPointerCursor);
+          map.on("move", updateMarkerPlacements);
+          map.on("move", updateMarkerCardPlacements);
+          map.on("move", updatePendingPlacement);
+          map.on("moveend", persistViewport);
+          map.on("resize", updateMarkerPlacements);
+          map.on("resize", updateMarkerCardPlacements);
+          map.on("resize", updatePendingPlacement);
+          map.getCanvas().addEventListener("mouseenter", setPointerCursor);
+          map.getCanvas().addEventListener("mouseleave", resetPointerCursor);
         });
 
         map.on("error", () => {
@@ -425,13 +643,23 @@ export function MapPreview({
 
     return () => {
       cancelled = true;
+      window.cancelAnimationFrame(resizeFrame);
+      resizeObserver?.disconnect();
       mapLoadedRef.current = false;
+      selectedViewportFocusSignatureRef.current = null;
+      setMapReady(false);
       mapRef.current?.remove();
       mapRef.current = null;
       mapboxRef.current = null;
       fittedBoundsRef.current = false;
+      updateMarkerPlacementsRef.current = () => {};
+      updateMarkerCardPlacementsRef.current = () => {};
+      updatePendingPlacementRef.current = () => {};
+      setMarkerPlacements({});
+      setMarkerCardPlacements({});
+      setPendingPlacement(null);
     };
-  }, [featureCollection, onSelectTile]);
+  }, []);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -456,74 +684,262 @@ export function MapPreview({
       });
       fittedBoundsRef.current = true;
     }
-  }, [featureCollection]);
+
+    updateMarkerPlacementsRef.current();
+    updateMarkerCardPlacementsRef.current();
+    updatePendingPlacementRef.current();
+  }, [featureCollection, visibleMarkerCards]);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !selectedGeohash) {
+    updatePendingPlacementRef.current();
+  }, [pendingGeohash]);
+
+  useEffect(() => {
+    if (!selectedGeohash || !visibleTiles.some((tile) => tile.geohash === selectedGeohash)) {
       return;
     }
 
-    const selectedFeature = featureCollection.features.find(
-      (feature) => feature.properties.geohash === selectedGeohash
-    );
-    if (!selectedFeature) {
+    bringGeohashToFront(selectedGeohash);
+  }, [focusRequestKey, selectedGeohash, visibleTiles]);
+
+  useEffect(() => {
+    const focusSignature = selectedGeohash ? `${selectedGeohash}:${focusRequestKey ?? ""}` : null;
+
+    if (!mapReady) {
+      return;
+    }
+
+    const map = mapRef.current;
+    if (!map || !selectedGeohash) {
+      selectedViewportFocusSignatureRef.current = null;
+      return;
+    }
+
+    if (selectedViewportFocusSignatureRef.current === focusSignature) {
+      return;
+    }
+
+    const center = decodeGeohashCenter(selectedGeohash);
+    if (!center) {
       return;
     }
 
     map.easeTo({
-      center: selectedFeature.geometry.coordinates as [number, number],
-      duration: 450,
-      zoom: Math.max(map.getZoom(), 12.5)
+      center,
+      duration: 320,
+      essential: true
     });
-  }, [featureCollection, selectedGeohash]);
+    selectedViewportFocusSignatureRef.current = focusSignature;
+  }, [focusRequestKey, mapReady, selectedGeohash]);
+
+  function forwardWheelToMap(event: React.WheelEvent<HTMLElement>) {
+    if (!shouldLoadMapbox || !containerRef.current || !mapRef.current) {
+      return;
+    }
+
+    if (canConsumeWheelEvent(event.target, event.currentTarget, event.deltaY)) {
+      event.stopPropagation();
+      return;
+    }
+
+    event.preventDefault();
+
+    const interactionTarget =
+      ((mapRef.current as MapboxMap & {
+        getCanvasContainer?: () => MapInteractionTarget;
+      }).getCanvasContainer?.() ??
+        mapRef.current.getCanvas()) as MapInteractionTarget;
+
+    interactionTarget.dispatchEvent(
+      new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaMode: event.deltaMode,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        deltaZ: event.deltaZ,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey
+      })
+    );
+  }
+
+  function bringGeohashToFront(geohash: string) {
+    setPairLayers((current) => {
+      const currentLayer = current[geohash];
+      if (currentLayer == null) {
+        return current;
+      }
+
+      const maxLayer = Math.max(...Object.values(current));
+      if (currentLayer === maxLayer) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [geohash]: maxLayer + 1
+      };
+    });
+  }
+
+  function selectMarkerGeohash(geohash: string) {
+    bringGeohashToFront(geohash);
+    onSelectTile?.(geohash);
+  }
+
+  function handleMarkerPointerDown(
+    event: React.PointerEvent<HTMLButtonElement>,
+    geohash: string
+  ) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    selectMarkerGeohash(geohash);
+  }
+
+  function handleMarkerClick(event: React.MouseEvent<HTMLButtonElement>, geohash: string) {
+    // Keyboard activation does not emit pointer events, so preserve it here
+    // while pointer interactions select on pointer down before z-index changes
+    // can interfere with the later click event.
+    if (event.detail === 0) {
+      selectMarkerGeohash(geohash);
+    }
+  }
 
   return (
     <section className="world-map" aria-label="World map">
       <div className="map-surface world-map-surface">
         <div ref={containerRef} className="mapbox-canvas" />
         {!shouldLoadMapbox ? <div className="map-grid" aria-hidden="true" /> : null}
-        {!shouldLoadMapbox
-          ? visibleTiles.map((tile, index) => {
-              const position = markerPositions[index % markerPositions.length];
-              const isSelected = tile.geohash === selectedGeohash;
-              const isActive = tile.geohash === activeGeohash;
+        {visibleTiles.map((tile) => {
+          const position = markerPlacements[tile.geohash];
+          if (!position) {
+            return null;
+          }
+
+          const isSelected = tile.geohash === selectedGeohash;
+          const isActive = tile.geohash === activeGeohash;
+          const label = tile.name ?? tile.title ?? tile.geohash;
+          const pairLayer = pairLayers[tile.geohash] ?? visibleTiles.findIndex((entry) => entry.geohash === tile.geohash) + 1;
+          const pairZBase = pairLayer * pairLayerStride;
+
+          return (
+            <button
+              key={tile.geohash}
+              className={[
+                "tile-marker",
+                tile.live || tile.participants.length > 0 ? "tile-marker-live" : "",
+                isSelected ? "tile-marker-selected" : "",
+                isActive ? "tile-marker-active" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              type="button"
+              style={{
+                ...position,
+                zIndex: pairZBase + (isSelected || isActive ? 1 : 0)
+              }}
+              aria-pressed={isSelected}
+              aria-label={`${label} ${tile.geohash} has ${tile.noteCount} notes and ${tile.participants.length} live participants`}
+              onClick={(event) => handleMarkerClick(event, tile.geohash)}
+              onFocus={() => bringGeohashToFront(tile.geohash)}
+              onPointerDown={(event) => handleMarkerPointerDown(event, tile.geohash)}
+              onWheel={forwardWheelToMap}
+            >
+              <span className="tile-marker-ring" aria-hidden="true" />
+              {tile.avatarUrl ? (
+                <img className="tile-marker-avatar" src={tile.avatarUrl} alt={label} loading="lazy" />
+              ) : (
+                <span className="tile-marker-fallback" aria-hidden="true">
+                  {resolveMarkerInitials(label)}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {visibleMarkerCards.length > 0 ? (
+          <div className="world-map-layer">
+            {visibleMarkerCards.map((card) => {
+              const placement = markerCardPlacements[card.geohash];
+              if (!placement) {
+                return null;
+              }
+
+              const pairLayer =
+                pairLayers[card.geohash] ?? visibleTiles.findIndex((tile) => tile.geohash === card.geohash) + 1;
 
               return (
-                <button
-                  key={tile.geohash}
-                  className={[
-                    "tile-marker",
-                    tile.participants.length > 0 ? "tile-marker-live" : "",
-                    isSelected ? "tile-marker-selected" : "",
-                    isActive ? "tile-marker-active" : ""
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  type="button"
-                  style={position}
-                  aria-pressed={isSelected}
-                  aria-label={`${tile.title} ${tile.geohash} has ${tile.noteCount} notes and ${tile.participants.length} live participants`}
-                  onClick={() => onSelectTile?.(tile.geohash)}
+                <div
+                  key={card.geohash}
+                  className="marker-card-anchor"
+                  style={{
+                    left: placement.left,
+                    top: placement.top,
+                    zIndex: pairLayer * pairLayerStride - 1
+                  }}
+                  onWheel={forwardWheelToMap}
                 >
-                  <span className="tile-marker-ring" aria-hidden="true" />
-                  <strong>{tile.noteCount}</strong>
-                </button>
+                  <div
+                    className="marker-card"
+                    aria-label={card.ariaLabel}
+                    onPointerDown={() => bringGeohashToFront(card.geohash)}
+                  >
+                    {card.content}
+                  </div>
+                </div>
               );
-            })
-          : null}
-        <div className="world-map-hud world-map-hud-top">
-          <span className={hasMapboxConfig ? "config-pill ready" : "config-pill"}>
-            {hasMapboxConfig ? "Mapbox configured" : "Mapbox token required"}
-          </span>
-          <div className="map-overlay">
-            <p>Canonical public precision: geohash6</p>
-            <p>Map stays pannable and zoomable. Marker clusters expand as you move in.</p>
+            })}
           </div>
-        </div>
+        ) : null}
+        {pendingPlacement ? (
+          <div
+            className="map-pending-pin"
+            style={{
+              left: pendingPlacement.left,
+              top: pendingPlacement.top
+            }}
+            aria-hidden="true"
+          >
+            <span className="map-pending-pin-ring" />
+            <span className="map-pending-pin-core" />
+          </div>
+        ) : null}
         {children ? <div className="world-map-layer">{children}</div> : null}
         {mapError ? <p className="map-overlay map-error">{mapError}</p> : null}
       </div>
     </section>
   );
+}
+
+function resolveMarkerInitials(label: string) {
+  const parts = label
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  if (parts.length === 0) {
+    return "B";
+  }
+
+  return parts.map((part) => part[0]?.toUpperCase() ?? "").join("");
+}
+
+function getFallbackPendingPlacement(geohash: string): MarkerPlacement {
+  const positionIndex =
+    geohash.split("").reduce((total, character) => total + character.charCodeAt(0), 0) % markerPositions.length;
+  const position = markerPositions[positionIndex];
+
+  return {
+    top: `calc(${position.top} + 23px)`,
+    left: `calc(${position.left} + 23px)`
+  };
 }

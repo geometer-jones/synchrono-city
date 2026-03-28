@@ -1,7 +1,9 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useSearchParams } from "react-router-dom";
 
-import { AppStateProvider, useAppState } from "../app-state";
+import { AppStateProvider } from "../app-state";
 import { CallOverlay } from "../components/call-overlay";
+import { ErrorBoundary } from "../components/error-boundary";
 
 const navItems = [
   { to: "/app", label: "World", end: true },
@@ -19,23 +21,29 @@ export function AppShell() {
 }
 
 function AppShellLayout() {
-  const { activeCall, sceneHealth } = useAppState();
+  const [searchParams] = useSearchParams();
+  const [rememberedBeaconGeohash, setRememberedBeaconGeohash] = useState(() => searchParams.get("beacon") ?? "");
+
+  useEffect(() => {
+    const selectedBeaconGeohash = searchParams.get("beacon");
+    if (selectedBeaconGeohash) {
+      setRememberedBeaconGeohash(selectedBeaconGeohash);
+    }
+  }, [searchParams]);
+
+  const preservedSearch = rememberedBeaconGeohash ? `?beacon=${encodeURIComponent(rememberedBeaconGeohash)}` : "";
 
   return (
     <div className="app-shell">
       <header className="app-bar">
         <div className="app-bar-brand">
-          <p className="eyebrow">Synchrono City</p>
-          <strong>Map-native coordination for sovereign communities.</strong>
-          <p className="muted app-bar-copy">
-            World stays map-first. Governance, media, and intelligence stay inside the same shell.
-          </p>
+          <h1 className="app-bar-title">Synchrono.City</h1>
         </div>
         <nav className="app-nav app-nav-desktop" aria-label="Primary">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
-              to={item.to}
+              to={{ pathname: item.to, search: preservedSearch }}
               end={item.end}
               className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
             >
@@ -43,34 +51,30 @@ function AppShellLayout() {
             </NavLink>
           ))}
         </nav>
-        <div className="app-bar-status">
-          <span className="status-pill status-pill-live">Roadmap: Phase 6</span>
-          <span className="status-pill">{sceneHealth.activeTiles} live tiles</span>
-          <span className="status-pill">{sceneHealth.openSeats} open seats</span>
-          <span className={activeCall ? "status-pill status-pill-live" : "status-pill"}>
-            {activeCall ? activeCall.geohash : "No active room"}
-          </span>
-        </div>
       </header>
 
       <main className="content">
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
 
-      <nav className="app-nav app-nav-mobile" aria-label="Primary mobile">
-        {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
-          >
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
+      <div className="app-bottom-chrome">
+        <CallOverlay />
 
-      <CallOverlay />
+        <nav className="app-nav app-nav-mobile" aria-label="Primary mobile">
+          {navItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={{ pathname: item.to, search: preservedSearch }}
+              end={item.end}
+              className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+      </div>
     </div>
   );
 }

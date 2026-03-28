@@ -120,6 +120,24 @@ Status tags below were updated against the current codebase on 2026-03-18.
 
 ## Client
 
+### LiveKit Token Auto-Refresh
+- **What:** Check expiresAt every minute, refresh 5 min before expiry, update activeCall state seamlessly
+- **Why:** Tokens expire without warning; users in long calls get disconnected silently
+- **Where:** app-state.tsx joinPlaceCall flow
+- **Effort:** M
+- **Priority:** P2
+- **Approach:** Add useEffect with interval that checks activeCall.expiresAt, calls requestLiveKitToken before expiry
+- **Context:** From eng review 2026-03-26. Tokens typically 24hr but calls can be longer.
+
+### Error Path Tests
+- **What:** Add tests for error scenarios: LiveKit token fetch failure (401/503), bootstrap fetch failure recovery, call control toggle failure
+- **Why:** Happy path coverage is excellent but error paths are untested; silent failures could go undetected
+- **Where:** apps/web/src/app.test.tsx, apps/web/src/routes/world-route.test.tsx
+- **Effort:** M
+- **Priority:** P2
+- **Approach:** Mock fetch/LiveKit to return errors, verify toast messages and fallback states
+- **Context:** From eng review 2026-03-26. Test gaps identified in call flow error handling.
+
 ### Double-Click Protection
 - **What:** Prevent duplicate form submissions on double-click
 - **Why:** Users may double-click submit buttons, causing duplicate actions
@@ -144,6 +162,16 @@ Status tags below were updated against the current codebase on 2026-03-18.
 - **Priority:** P3
 - **Approach:** Debounce geohash queries, cache tile data
 
+### Browser E2E Beacon Flow
+- **What:** Add a thin browser E2E harness for the relay-native beacon world flow
+- **Why:** The startup path spans NIP-11, NIP-29 beacon discovery, Concierge overlay enrichment, and LiveKit token vending; a browser-level smoke test catches integration seams unit tests miss
+- **Where:** Web test tooling plus one world-flow spec covering `/app`
+- **Effort:** M
+- **Priority:** P3
+- **Approach:** Keep the current high-fidelity Vitest integration tests for this PR, then add one browser test after the relay-native beacon fetch path stabilizes
+- **Context:** From eng review 2026-03-27. This was explicitly deferred when choosing Vitest full-flow coverage now instead of adding Playwright in the same protocol-cut PR
+- **Depends on / blocked by:** Relay-native beacon fetch, tiny Concierge bootstrap, and `beacon:<id>` room flow landing first so the browser spec does not churn immediately
+
 ---
 
 ## Concierge
@@ -166,6 +194,46 @@ Status tags below were updated against the current codebase on 2026-03-18.
 - **Effort:** S
 - **Priority:** P1
 - **Approach:** Join queries or batch loading
+
+---
+
+## Study Circle Office Hours
+
+### Host-Level Multi-Circle Index
+
+**What:** Add a host-level index so users can browse all circles run by the same organizer.
+
+**Why:** Once one host runs multiple distinct circles, users will need a second discovery path beyond the map to understand the organizer's room constellation.
+
+**Context:** Deferred during the 2026-03-27 CEO review because the v1 wedge should stay map-first and room-first. This likely becomes important after one host successfully runs multiple active circles and users want cleaner repeat navigation.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** Proving that one host actually runs multiple circles users care about.
+
+### Self-Serve Mobile and Zap Proof Verification
+
+**What:** Add self-serve `mobile` and `zap` proof verification flows to the Concierge gate stack.
+
+**Why:** Relay-owner anti-abuse pressure may eventually require stronger proofs than self-serve `oauth` and `nip05` alone.
+
+**Context:** Deferred during the 2026-03-27 CEO review. The accepted v1 proof posture is self-serve `oauth` and `nip05`, with `mobile` and `zap` remaining manual or deferred until real abuse patterns justify the extra SMS or payment infrastructure.
+
+**Effort:** L
+**Priority:** P2
+**Depends on:** Evidence that current proof gates are insufficient, plus a concrete decision on which abuse pattern actually needs mobile or zap verification.
+
+### Structured Session Metadata for Cohort Beacons
+
+**What:** Add a lightweight beacon-native way to represent upcoming session time and cadence for cohort beacons.
+
+**Why:** Pinned-note prose is enough for v1 memory, but "next session" clarity gets brittle fast if it only lives in free text.
+
+**Context:** Deferred during the 2026-03-27 Eng review for the Hybrid Beginner Neural Nets Cohort plan. The accepted v1 shape keeps cohorts as plain beacons, with mutable week state and artifacts living in pinned notes. If real pilots show that users need clearer schedule visibility or reminder surfaces, add stable beacon metadata or tag conventions for next-session time and cadence without introducing a separate cohort model.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** Running at least one real cohort and confirming that pinned-note-only schedule copy causes confusion.
 
 ---
 
@@ -308,3 +376,104 @@ Current state: the Settings route now includes authenticated governance workflow
 ### Relay Degraded Mode (Phase 4+)
 - Allow publishes when Concierge is unavailable
 - Cache policy decisions with TTL
+
+---
+
+## Beacon Migration (2026-03-26)
+
+### P1: Critical
+
+#### Beacon Creation Idempotency
+- **What:** Add create-or-return-existing semantics for beacon creation keyed by bare `geohash8`
+- **Why:** Two clients may light the same beacon concurrently; duplicates would violate the one-beacon-per-geohash rule
+- **Effort:** M
+- **Where:** Concierge beacon/group creation path, any persistence layer for beacon identity
+- **Approach:** Enforce unique beacon identity on `geohash8`, make concurrent losers receive the existing beacon payload instead of a hard duplicate error
+
+#### Beacon-Scoped Posting
+- **What:** Replace raw geohash place-post semantics with kind `1` events scoped by `h=<geohash8>`
+- **Why:** Public World conversation now belongs to NIP-29 beacons, not to geohash note buckets
+- **Effort:** M
+- **Where:** web Nostr helpers, social payloads, relay query paths
+- **Approach:** Treat `h` as the beacon scope everywhere, keep geohash tags for beacon discovery/metadata rather than primary thread identity
+
+#### Beacon Room Token Vending
+- **What:** Change public LiveKit room naming and token vending to `beacon:<geohash8>`
+- **Why:** Media rooms should be namespaced to the beacon model and separated from bare group ids
+- **Effort:** M
+- **Where:** Concierge token vending, room validation, web call join flow
+- **Approach:** Introduce explicit beacon room parsing and keep DM / group DM room formats unchanged
+
+#### Relay-over-Beacon Authority
+- **What:** Enforce that relay auth and relay policy override beacon-local NIP-29 admin decisions
+- **Why:** Beacon admins can moderate locally, but relay operators remain the sovereign enforcement boundary
+- **Effort:** M
+- **Where:** Concierge policy evaluation, token vending, publish authorization
+- **Approach:** Evaluate relay-wide policy first, then beacon-local permissions inside that allowed envelope
+
+### P2: Should fix soon
+
+#### World Beacon Creation UI
+- **What:** Implement pin-drop plus bottom-sheet creation flow with `Light Beacon`, `Cancel`, then `name`, `pic`, `about`
+- **Why:** The client spec now requires creation from empty-map interaction instead of immediate room join
+- **Effort:** M
+- **Where:** `world-route.tsx`, `map-preview.tsx`, `app-state.tsx`, `styles.css`
+- **Approach:** Separate map selection from media join and keep the full-screen map intact during creation
+
+#### Avatar Marker and Attached Card Rendering
+- **What:** Replace numeric markers with beacon avatars and attached behind-the-avatar cards
+- **Why:** Beacon identity is now visual-first; counters move into the card
+- **Effort:** M
+- **Where:** map components, world route, styling
+- **Approach:** Render avatar as foreground anchor, then attach a z-indexed card showing name, about, post count, live count, latest activity, and roster
+
+#### Pulse Boundary Enforcement
+- **What:** Keep beacon conversation inside World and prevent beacon-scoped posts from opening in Pulse
+- **Why:** The new route contract reserves Pulse for profiles and non-beacon public events
+- **Effort:** S
+- **Where:** `pulse-route.tsx`, world navigation, data selectors
+- **Approach:** Detect beacon `h` scope and short-circuit note-detail routing into World-owned UI
+
+#### Beacon Metadata and Discovery
+- **What:** Represent beacon metadata (`name`, `pic`, `about`) and geohash prefix tags `1..8` consistently in client and backend models
+- **Why:** Avatar markers, cards, and creation flow depend on stable beacon metadata
+- **Effort:** M
+- **Where:** bootstrap payloads, app-state models, any concierge social/bootstrap representation
+- **Approach:** Add a first-class beacon model instead of inferring from raw place-note state
+
+#### Compatibility Shim Cleanup
+- **What:** Remove legacy `geo:` room-id compatibility and legacy raw-geohash note-scope read paths after the beacon contract rollout soaks
+- **Why:** Dual-read and dual-vocabulary support is useful during migration, but leaving it in place permanently will make every future beacon change harder to reason about
+- **Effort:** S
+- **Where:** `apps/web/src/data.ts`, `apps/web/src/nostr.ts`, `apps/web/src/app-state.tsx`, `apps/concierge/internal/social/service.go`, related tests
+- **Approach:** Land compatibility first, verify rollout, then delete the shims in one focused cleanup PR with regression coverage locked in
+
+#### Universal Beacon Inbox
+- **What:** Extend `Chats` into the Phase 2 universal inbox for beacon threads alongside DMs and group DMs
+- **Why:** The approved product shape wants beacons to be reachable from both `World` and `Chats`, but Phase 1 intentionally keeps `Chats` private-only to keep the World-first diff small
+- **Effort:** M
+- **Where:** `apps/web/src/routes/chats-route.tsx`, `app-shell` navigation state, beacon thread selection state, app-state projections
+- **Approach:** Preserve the current private-thread split view, then add beacon conversations as a first-class thread kind once the beacon rename and projection layer land cleanly
+
+#### Beacon Governance UI
+- **What:** Add Phase 2 beacon settings, members, and admin controls for openness policy and moderation
+- **Why:** Phase 1 adopts real NIP-29-shaped beacons on the backend, but deliberately defers the client controls needed to inspect or change group policy
+- **Effort:** M
+- **Where:** `apps/web/src/routes/world-route.tsx`, future beacon settings/member surfaces, concierge policy endpoints, beacon bootstrap/admin payloads
+- **Approach:** Land the World-first beacon loop first, then expose read/write governance UI once the beacon policy model settles from alpha usage
+
+### P3: Nice to have
+
+#### Coarse Discovery Policy
+- **What:** Explore operator-controlled coarse map discovery or gated fine-precision beacon creation without changing the interoperable beacon id
+- **Why:** There is interest in lower default discovery precision, but the core spec still anchors beacon identity at `geohash8`
+- **Effort:** M
+- **Where:** protocol policy docs, map query layer, operator config
+- **Approach:** Treat this as local policy and pricing/gating, not as a change to the interoperable object model
+
+#### Beacon Lifecycle / Archive Policy
+- **What:** Define archive or tombstone behavior for mistaken or abandoned beacons
+- **Why:** Beacons are immovable, so operators need a cleanup policy that does not violate identity stability
+- **Effort:** S
+- **Where:** protocol docs, moderation tooling, client empty-state behavior
+- **Approach:** Prefer archive/tombstone over deletion by inactivity unless product requirements change

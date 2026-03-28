@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import {
   AdminAuthError,
@@ -42,16 +42,24 @@ import {
 } from "../admin-client";
 import { ApiError, apiFetch } from "../api";
 import { useAppState } from "../app-state";
+import { ResizablePanels } from "../components/resizable-panels";
+import { useNarrowViewport } from "../hooks/use-viewport";
+import {
+  addKeyToKeyring,
+  clearStoredLocalKeyring,
+  createEmptyLocalKeyring,
+  generateLocalKeyMaterial,
+  getActiveLocalKey,
+  importLocalKeyMaterial,
+  loadStoredLocalKeyring,
+  removeKeyFromKeyring,
+  setActiveKeyInKeyring,
+  storeLocalKeyring,
+  type LocalKeyring
+} from "../key-manager";
+import { uploadBlossomFile } from "../media-client";
+import { publishSignedEvent, signEventWithPrivateKey, type ProfileMetadataContent } from "../nostr";
 import { showToast } from "../toast";
-
-const adminCapabilities = [
-  "Roles and standing management",
-  "Guest list and blocklist control",
-  "Room-level permissions",
-  "Proof verification and gate stacking",
-  "Relay feed pinning and editorial controls",
-  "Privileged audit history"
-] as const;
 
 type RelayHealth = {
   status: string;
@@ -66,17 +74,45 @@ type AdminSession = {
   access: AdminAccessDecision;
 };
 
+type MetadataDraft = {
+  name: string;
+  picture: string;
+  about: string;
+};
+
 const defaultStanding = "member";
 const defaultProofType = "oauth";
 const defaultGateCapability = "relay.publish";
 
 export function SettingsRoute() {
-  const { activeCall, currentUser, listThreads, places, relayOperatorPubkey, refreshSocialBootstrap, sceneHealth } = useAppState();
+  const {
+    currentUser,
+    profiles,
+    relayList,
+    relayOperatorPubkey,
+    relayURL,
+    addRelayListEntry,
+    removeRelayListEntry,
+    refreshSocialBootstrap,
+    setLocalCurrentUserPubkey,
+    setProfileMetadata
+  } = useAppState();
   const [health, setHealth] = useState<RelayHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [lastMutation, setLastMutation] = useState<string | null>(null);
+  const [localKeyring, setLocalKeyring] = useState<LocalKeyring>(() => loadStoredLocalKeyring());
+  const [importKeysOpen, setImportKeysOpen] = useState(false);
+  const [keyImportValue, setKeyImportValue] = useState("");
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [metadataDrafts, setMetadataDrafts] = useState<Record<string, MetadataDraft>>({});
+  const [metadataErrors, setMetadataErrors] = useState<Record<string, string>>({});
+  const [metadataSaving, setMetadataSaving] = useState<Record<string, boolean>>({});
+  const [pictureUploading, setPictureUploading] = useState<Record<string, boolean>>({});
+  const [selectedKeyPubkey, setSelectedKeyPubkey] = useState<string | null>(
+    () => loadStoredLocalKeyring().activePublicKeyNpub
+  );
 
   const [guestEntries, setGuestEntries] = useState<PolicyAssignment[]>([]);
   const [blockEntries, setBlockEntries] = useState<PolicyAssignment[]>([]);
@@ -124,6 +160,13 @@ export function SettingsRoute() {
   const [pinGeohash, setPinGeohash] = useState("");
   const [pinNoteID, setPinNoteID] = useState("");
   const [pinLabel, setPinLabel] = useState("featured");
+  const [relayDraftName, setRelayDraftName] = useState("");
+  const [relayDraftURL, setRelayDraftURL] = useState("");
+  const [relayListError, setRelayListError] = useState<string | null>(null);
+  const [keysOpen, setKeysOpen] = useState(true);
+  const [relaysOpen, setRelaysOpen] = useState(true);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const isNarrowKeysLayout = useNarrowViewport(900);
 
   const refreshGenerationRef = useRef(0);
 
@@ -150,9 +193,65 @@ export function SettingsRoute() {
     };
   }, []);
 
-  const threads = listThreads();
-  const occupiedSeats = places.reduce((total, place) => total + place.occupantPubkeys.length, 0);
   const canAdmin = adminSession?.access.decision === "allow";
+  const activeLocalKey = getActiveLocalKey(localKeyring);
+  const hasOperatorPubkey =
+    currentUser.pubkey === relayOperatorPubkey || adminSession?.pubkey === relayOperatorPubkey;
+
+  useEffect(() => {
+    setMetadataDrafts((current) => {
+      const nextDrafts: Record<string, MetadataDraft> = {};
+
+      for (const key of localKeyring.keys) {
+        const existingDraft = current[key.publicKeyNpub];
+        const profile = profiles.find((entry) => entry.pubkey === key.publicKeyNpub);
+        const profileDraft = {
+          name: profile?.name ?? profile?.displayName ?? "",
+          picture: profile?.picture ?? "",
+          about: profile?.bio ?? ""
+        };
+
+        nextDrafts[key.publicKeyNpub] =
+          shouldHydrateMetadataDraft(existingDraft) ? profileDraft : existingDraft;
+      }
+
+      return nextDrafts;
+    });
+  }, [localKeyring.keys, profiles]);
+
+  useEffect(() => {
+    if (localKeyring.keys.length === 0) {
+      setSelectedKeyPubkey(null);
+      return;
+    }
+
+    if (selectedKeyPubkey && localKeyring.keys.some((key) => key.publicKeyNpub === selectedKeyPubkey)) {
+      return;
+    }
+
+    setSelectedKeyPubkey(activeLocalKey?.publicKeyNpub ?? localKeyring.keys[0]?.publicKeyNpub ?? null);
+  }, [activeLocalKey?.publicKeyNpub, localKeyring.keys, selectedKeyPubkey]);
+
+  useEffect(() => {
+    if (hasOperatorPubkey) {
+      setAdminOpen(true);
+    }
+  }, [hasOperatorPubkey]);
+
+  function updateMetadataDraft(publicKeyNpub: string, patch: Partial<MetadataDraft>) {
+    setMetadataDrafts((current) => ({
+      ...current,
+      [publicKeyNpub]: {
+        ...getMetadataDraft(current, publicKeyNpub),
+        ...patch
+      }
+    }));
+    setMetadataErrors((current) => {
+      const next = { ...current };
+      delete next[publicKeyNpub];
+      return next;
+    });
+  }
 
   async function handleConnectSigner() {
     setIsConnecting(true);
@@ -172,6 +271,163 @@ export function SettingsRoute() {
       setLastMutation(null);
     } finally {
       setIsConnecting(false);
+    }
+  }
+
+  function commitLocalKeyring(nextKeyring: LocalKeyring) {
+    const normalizedKeyring =
+      nextKeyring.keys.length > 0 ? nextKeyring : createEmptyLocalKeyring();
+
+    setLocalKeyring(normalizedKeyring);
+    if (normalizedKeyring.keys.length === 0) {
+      clearStoredLocalKeyring();
+      setLocalCurrentUserPubkey(null);
+      return;
+    }
+
+    storeLocalKeyring(normalizedKeyring);
+    setLocalCurrentUserPubkey(normalizedKeyring.activePublicKeyNpub);
+  }
+
+  function handleGenerateKeys() {
+    const result = addKeyToKeyring(localKeyring, generateLocalKeyMaterial());
+    commitLocalKeyring(result.keyring);
+    setSelectedKeyPubkey(result.activeKey.publicKeyNpub);
+    setKeyImportValue("");
+    setKeyError(null);
+    showToast(result.added ? "Local Nostr keypair generated." : "Existing local key activated.", "info");
+  }
+
+  function handleImportKeys() {
+    try {
+      const result = addKeyToKeyring(localKeyring, importLocalKeyMaterial(keyImportValue));
+      commitLocalKeyring(result.keyring);
+      setSelectedKeyPubkey(result.activeKey.publicKeyNpub);
+      setImportKeysOpen(false);
+      setKeyImportValue("");
+      setKeyError(null);
+      showToast(result.added ? "Local Nostr keypair imported." : "Imported key already exists. Activated existing key.", "info");
+    } catch (error) {
+      setKeyError(error instanceof Error ? error.message : "Key import failed.");
+    }
+  }
+
+  function handleStartImportKeys() {
+    setImportKeysOpen(true);
+    setKeyError(null);
+  }
+
+  function handleCancelImportKeys() {
+    setImportKeysOpen(false);
+    setKeyImportValue("");
+    setKeyError(null);
+  }
+
+  function handleActivateKey(publicKeyNpub: string) {
+    setSelectedKeyPubkey(publicKeyNpub);
+    commitLocalKeyring(setActiveKeyInKeyring(localKeyring, publicKeyNpub));
+    setKeyError(null);
+    showToast("Local key activated for this session.", "info");
+  }
+
+  function handleRemoveKey(publicKeyNpub: string) {
+    const key = localKeyring.keys.find((entry) => entry.publicKeyNpub === publicKeyNpub);
+    if (!key) {
+      return;
+    }
+
+    const metadataDraft = getMetadataDraft(metadataDrafts, publicKeyNpub);
+    const keyLabel = getLocalKeyDisplayName(metadataDraft, key);
+    const confirmed = window.confirm(
+      `Remove ${keyLabel} from this browser? This deletes the stored private key and cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    const removingActiveKey = activeLocalKey?.publicKeyNpub === publicKeyNpub;
+    commitLocalKeyring(removeKeyFromKeyring(localKeyring, publicKeyNpub));
+    setKeyError(null);
+    showToast(removingActiveKey ? "Active local key removed." : "Local key removed.", "info");
+  }
+
+  async function handleCopyKeyValue(label: string, value: string) {
+    if (!navigator.clipboard?.writeText) {
+      showToast("Clipboard unavailable in this browser.", "error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(`${label} copied.`, "info");
+    } catch {
+      showToast(`Unable to copy ${label.toLowerCase()}.`, "error");
+    }
+  }
+
+  async function handleMetadataPictureUpload(key: LocalKeyring["keys"][number], file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    setPictureUploading((current) => ({ ...current, [key.publicKeyNpub]: true }));
+    setMetadataErrors((current) => {
+      const next = { ...current };
+      delete next[key.publicKeyNpub];
+      return next;
+    });
+
+    try {
+      const upload = await uploadBlossomFile(file, undefined, {
+        privateKeyHex: key.privateKeyHex,
+        publicKeyHex: key.publicKeyHex
+      });
+      updateMetadataDraft(key.publicKeyNpub, { picture: upload.url });
+      showToast(`Uploaded ${file.name} to Blossom.`, "info");
+    } catch (error) {
+      setMetadataErrors((current) => ({
+        ...current,
+        [key.publicKeyNpub]: error instanceof Error ? error.message : "Picture upload failed."
+      }));
+    } finally {
+      setPictureUploading((current) => ({ ...current, [key.publicKeyNpub]: false }));
+    }
+  }
+
+  async function handleMetadataSubmit(event: FormEvent<HTMLFormElement>, key: LocalKeyring["keys"][number]) {
+    event.preventDefault();
+    setMetadataSaving((current) => ({ ...current, [key.publicKeyNpub]: true }));
+    setMetadataErrors((current) => {
+      const next = { ...current };
+      delete next[key.publicKeyNpub];
+      return next;
+    });
+
+    try {
+      const draft = getMetadataDraft(metadataDrafts, key.publicKeyNpub);
+      const metadata = buildProfileMetadataContent(draft);
+      const signedEvent = await signEventWithPrivateKey(
+        {
+          kind: 0,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [],
+          content: JSON.stringify(metadata)
+        },
+        key.privateKeyHex,
+        key.publicKeyHex
+      );
+
+      await publishSignedEvent(relayURL, signedEvent);
+      setProfileMetadata(key.publicKeyNpub, draft);
+      setLastMutation(`Kind 0 metadata published for ${key.publicKeyNpub}.`);
+      showToast("Metadata published.", "info");
+    } catch (error) {
+      setMetadataErrors((current) => ({
+        ...current,
+        [key.publicKeyNpub]: error instanceof Error ? error.message : "Metadata publish failed."
+      }));
+    } finally {
+      setMetadataSaving((current) => ({ ...current, [key.publicKeyNpub]: false }));
     }
   }
 
@@ -337,6 +593,9 @@ export function SettingsRoute() {
         : await revokeRoomPermission(roomPubkey, roomID);
       setLastMutation(`Room permission ${record.revoked ? "revoked" : "saved"} for ${record.subject_pubkey} on ${record.room_id}.`);
       showToast(action === "grant" ? "Room permission saved." : "Room permission revoked.", "info");
+      if (record.live_sync_warning) {
+        showToast(`Live room update failed: ${record.live_sync_warning}`, "error");
+      }
       await refreshGovernanceData();
     } catch (error) {
       setAdminError(formatAdminError(error));
@@ -351,6 +610,9 @@ export function SettingsRoute() {
       const record = await revokeRoomPermission(roomPubkey, roomID);
       setLastMutation(`Room permission revoked for ${record.subject_pubkey} on ${record.room_id}.`);
       showToast("Room permission revoked.", "info");
+      if (record.live_sync_warning) {
+        showToast(`Live room update failed: ${record.live_sync_warning}`, "error");
+      }
       await refreshGovernanceData();
     } catch (error) {
       setAdminError(formatAdminError(error));
@@ -422,46 +684,387 @@ export function SettingsRoute() {
     }
   }
 
+  function handleAddRelay(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setRelayListError(null);
+
+    try {
+      const entry = addRelayListEntry({
+        name: relayDraftName,
+        url: relayDraftURL
+      });
+      setRelayDraftName("");
+      setRelayDraftURL("");
+      showToast(`Added relay ${entry.name}.`, "info");
+    } catch (error) {
+      setRelayListError(error instanceof Error ? error.message : "Relay update failed.");
+    }
+  }
+
+  function handleRemoveRelay(url: string, label: string) {
+    setRelayListError(null);
+
+    try {
+      removeRelayListEntry(url);
+      showToast(`Removed relay ${label}.`, "info");
+    } catch (error) {
+      setRelayListError(error instanceof Error ? error.message : "Relay update failed.");
+    }
+  }
+
+  const selectedKey =
+    localKeyring.keys.find((key) => key.publicKeyNpub === selectedKeyPubkey) ?? activeLocalKey ?? localKeyring.keys[0] ?? null;
+  const selectedMetadataDraft = selectedKey ? getMetadataDraft(metadataDrafts, selectedKey.publicKeyNpub) : null;
+  const selectedMetadataError = selectedKey ? metadataErrors[selectedKey.publicKeyNpub] : null;
+  const isSelectedUploadingPicture = selectedKey ? pictureUploading[selectedKey.publicKeyNpub] === true : false;
+  const isSelectedSavingMetadata = selectedKey ? metadataSaving[selectedKey.publicKeyNpub] === true : false;
+  const isSelectedKeyActive = selectedKey ? activeLocalKey?.publicKeyNpub === selectedKey.publicKeyNpub : false;
+  const keysListPanel = (
+    <div className="admin-form keys-list-panel">
+      {!importKeysOpen ? (
+        <div className="action-row">
+          <button className="primary-button" type="button" onClick={handleGenerateKeys}>
+            Generate keys
+          </button>
+          <button className="secondary-button" type="button" onClick={handleStartImportKeys}>
+            Import keys
+          </button>
+        </div>
+      ) : null}
+      {importKeysOpen ? (
+        <>
+          <label className="field-stack">
+            <textarea
+              className="note-input key-secret-input"
+              value={keyImportValue}
+              onChange={(event) => setKeyImportValue(event.target.value)}
+              aria-label="Import private key"
+              placeholder="Paste nsec1... or 64-char hex private key"
+            />
+          </label>
+          <div className="action-row">
+            <button className="secondary-button" type="button" onClick={handleImportKeys}>
+              Import keys
+            </button>
+            <button className="secondary-button" type="button" onClick={handleCancelImportKeys}>
+              Cancel
+            </button>
+          </div>
+          {keyError ? <p className="field-error">{keyError}</p> : null}
+        </>
+      ) : null}
+      <div className="admin-record-list keys-summary-list">
+        {localKeyring.keys.length === 0 ? <p className="muted">No local keypairs stored in this browser.</p> : null}
+        {localKeyring.keys.map((key) => {
+          const metadataDraft = getMetadataDraft(metadataDrafts, key.publicKeyNpub);
+          const isActive = activeLocalKey?.publicKeyNpub === key.publicKeyNpub;
+          const displayName = getLocalKeyDisplayName(metadataDraft, key);
+
+          return (
+            <article key={key.id} className="mini-card admin-record key-summary-card">
+              <div className="key-summary-main">
+                <KeyAvatar picture={metadataDraft.picture} name={displayName} />
+                <div className="key-summary-meta">
+                  <strong>{displayName}</strong>
+                  <code className="key-summary-pubkey">{truncateMiddle(key.publicKeyHex, 8, 8)}</code>
+                </div>
+              </div>
+              <div className="key-summary-actions">
+                {isActive ? (
+                  <span className="thread-pill live">Active</span>
+                ) : (
+                  <button
+                    className="secondary-button key-activate-button"
+                    type="button"
+                    onClick={() => handleActivateKey(key.publicKeyNpub)}
+                  >
+                    Use key
+                  </button>
+                )}
+                <button
+                  className="secondary-button keys-mobile-only"
+                  type="button"
+                  onClick={() => setSelectedKeyPubkey(key.publicKeyNpub)}
+                >
+                  View profile
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+  const keysDetailPanel =
+    selectedKey && selectedMetadataDraft ? (
+      <article className="feature-card admin-form keys-detail-panel">
+        <div className="detail-header keys-detail-header">
+          <div className="keys-detail-title">
+            <KeyAvatar picture={selectedMetadataDraft.picture} name={getLocalKeyDisplayName(selectedMetadataDraft, selectedKey)} />
+            <div className="keys-detail-heading">
+              <div>
+                <p className="section-label">Active key</p>
+                <h3>{getLocalKeyDisplayName(selectedMetadataDraft, selectedKey)}</h3>
+              </div>
+              <button
+                className="secondary-button danger-button"
+                type="button"
+                onClick={() => handleRemoveKey(selectedKey.publicKeyNpub)}
+              >
+                Remove key
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {!isSelectedKeyActive ? (
+          <div className="action-row">
+            <button
+              className="secondary-button key-activate-button"
+              type="button"
+              onClick={() => handleActivateKey(selectedKey.publicKeyNpub)}
+            >
+              Use key
+            </button>
+          </div>
+        ) : null}
+
+        <table className="keypair-table">
+          <tbody>
+            <KeypairTableRow
+              label="Pubkey"
+              value={selectedKey.publicKeyHex}
+              onCopy={() => void handleCopyKeyValue("Pubkey", selectedKey.publicKeyHex)}
+            />
+            <KeypairTableRow
+              label="Npub"
+              value={selectedKey.publicKeyNpub}
+              onCopy={() => void handleCopyKeyValue("Npub", selectedKey.publicKeyNpub)}
+            />
+            <KeypairTableRow
+              label="Secret key"
+              value={selectedKey.privateKeyHex}
+              hidden
+              onCopy={() => void handleCopyKeyValue("Secret key", selectedKey.privateKeyHex)}
+            />
+            <KeypairTableRow
+              label="Nsec"
+              value={selectedKey.privateKeyNsec}
+              hidden
+              onCopy={() => void handleCopyKeyValue("Nsec", selectedKey.privateKeyNsec)}
+            />
+          </tbody>
+        </table>
+        <p className="muted">
+          {selectedKey.source} · {formatRelativeTime(selectedKey.createdAt)}
+        </p>
+
+        <form className="metadata-form" onSubmit={(event) => void handleMetadataSubmit(event, selectedKey)}>
+          <label className="field-stack">
+            <span>Name</span>
+            <input
+              className="field-input"
+              value={selectedMetadataDraft.name}
+              onChange={(event) => updateMetadataDraft(selectedKey.publicKeyNpub, { name: event.target.value })}
+              placeholder="Display name"
+              disabled={isSelectedSavingMetadata || isSelectedUploadingPicture}
+            />
+          </label>
+          <label className="field-stack">
+            <span>Picture</span>
+            {selectedMetadataDraft.picture ? (
+              <img
+                className="metadata-picture-preview"
+                src={selectedMetadataDraft.picture}
+                alt="Profile picture preview"
+              />
+            ) : null}
+            <p className={selectedMetadataDraft.picture ? "metadata-readonly-value" : "metadata-readonly-value muted"}>
+              {selectedMetadataDraft.picture || "Upload an image to Blossom"}
+            </p>
+          </label>
+          <label className="field-stack">
+            <span>Upload picture</span>
+            <input
+              className="field-input"
+              type="file"
+              accept="image/*"
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                void handleMetadataPictureUpload(selectedKey, file);
+                event.target.value = "";
+              }}
+              disabled={isSelectedSavingMetadata || isSelectedUploadingPicture}
+            />
+          </label>
+          <div className="action-row">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => updateMetadataDraft(selectedKey.publicKeyNpub, { picture: "" })}
+              disabled={
+                isSelectedSavingMetadata || isSelectedUploadingPicture || selectedMetadataDraft.picture.length === 0
+              }
+            >
+              Clear picture
+            </button>
+          </div>
+          <label className="field-stack">
+            <span>About</span>
+            <textarea
+              className="note-input"
+              value={selectedMetadataDraft.about}
+              onChange={(event) => updateMetadataDraft(selectedKey.publicKeyNpub, { about: event.target.value })}
+              placeholder="Short profile bio"
+              disabled={isSelectedSavingMetadata || isSelectedUploadingPicture}
+            />
+          </label>
+          {selectedMetadataError ? <p className="field-error">{selectedMetadataError}</p> : null}
+          <div className="action-row">
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={isSelectedSavingMetadata || isSelectedUploadingPicture}
+            >
+              {isSelectedSavingMetadata ? "Publishing..." : "Publish metadata"}
+            </button>
+            <span className="thread-pill">
+              {isSelectedUploadingPicture ? "Uploading picture" : "Kind 0 metadata"}
+            </span>
+          </div>
+        </form>
+      </article>
+    ) : null;
+
   return (
     <section className="panel route-surface route-surface-settings">
-      <p className="section-label">Settings</p>
-      <div className="detail-header route-header route-header-governance">
-        <div>
-          <h2>Relay Governance</h2>
-          <p className="muted route-header-copy">
-            Phase 5 operator controls for roles, proofs, gates, editorial pins, and privileged audit review.
-          </p>
-        </div>
-        <span className={health?.status === "ok" ? "status-pill status-pill-live" : "status-pill"}>
-          {health?.status === "ok" ? "Relay healthy" : healthError ?? "Checking relay"}
-        </span>
-      </div>
+      <SettingsSection
+        title="Keys"
+        description="Manage browser-local keypairs and profile metadata; the active key controls note authorship and place presence."
+        isOpen={keysOpen}
+        onToggle={() => setKeysOpen((open) => !open)}
+        status={activeLocalKey ? "Local key active" : "No local key"}
+      >
+        {!isNarrowKeysLayout && keysDetailPanel ? (
+          <ResizablePanels
+            className="keys-layout"
+            storageKey="settings-keys"
+            defaultPrimarySize={360}
+            minPrimarySize={280}
+            minSecondarySize={360}
+            handleLabel="Resize settings keys panels"
+            primary={keysListPanel}
+            secondary={keysDetailPanel}
+          />
+        ) : (
+          <div className="keys-layout">
+            {keysListPanel}
+            {keysDetailPanel}
+          </div>
+        )}
+      </SettingsSection>
 
-      <div className="feature-grid">
-        <article className="feature-card">
-          <p className="section-label">Relay identity</p>
-          <h3>{health?.relay_name ?? "Synchrono City relay"}</h3>
-          <dl className="metric-list">
-            <div>
-              <dt>Relay URL</dt>
-              <dd>{health?.relay_url ?? "Unavailable"}</dd>
-            </div>
-            <div>
-              <dt>Operator pubkey</dt>
-              <dd>{health?.operator_pubkey ?? relayOperatorPubkey}</dd>
-            </div>
-            <div>
-              <dt>Last health timestamp</dt>
-              <dd>{health?.timestamp ?? "Pending"}</dd>
-            </div>
-          </dl>
-        </article>
-
-        <article className="feature-card">
-          <p className="section-label">Signer</p>
-          <h3>{adminSession ? "Admin verified" : "Connect admin signer"}</h3>
+      <SettingsSection
+        title="Relays"
+        description="Relay list and local scene signals."
+        isOpen={relaysOpen}
+        onToggle={() => setRelaysOpen((open) => !open)}
+        status={health?.relay_name ?? "Relay"}
+      >
+        <div className="admin-form">
+          <h3>{relayList.length} {relayList.length === 1 ? "relay configured" : "relays configured"}</h3>
           <p className="muted">
-            Governance requests are signed in-browser with NIP-98 on every request.
+            Add or remove relay endpoints for this browser. Inbox and outbox flags still reflect the relay metadata
+            carried into the client.
+          </p>
+          <form className="relay-list-form" onSubmit={handleAddRelay}>
+            <label className="field-stack">
+              <span>Relay name</span>
+              <input
+                className="field-input"
+                value={relayDraftName}
+                onChange={(event) => setRelayDraftName(event.target.value)}
+                placeholder="Mission Mesh"
+              />
+            </label>
+            <label className="field-stack">
+              <span>Relay URL</span>
+              <input
+                className="field-input"
+                value={relayDraftURL}
+                onChange={(event) => setRelayDraftURL(event.target.value)}
+                placeholder="wss://mission.example/relay"
+              />
+            </label>
+            <div className="action-row">
+              <button className="primary-button" type="submit">
+                Add relay
+              </button>
+            </div>
+          </form>
+          {relayListError ? <p className="field-error">{relayListError}</p> : null}
+          <p className="muted relay-list-hint">
+            Relay list changes are stored in this browser and layered over the server bootstrap list.
+          </p>
+          <div className="admin-record-list relay-card-list">
+            {relayList.map((relay) => {
+              const relayLabel = relay.name.trim() || relay.url;
+              const isPrimaryRelay = relay.url === relayURL;
+
+              return (
+                <article key={relay.url} className="mini-card admin-record relay-list-card">
+                  <div className="detail-header">
+                    <strong>{relayLabel}</strong>
+                    <span className={isPrimaryRelay ? "thread-pill live" : "thread-pill"}>
+                      {isPrimaryRelay ? "Primary" : "Listed"}
+                    </span>
+                  </div>
+                  <p className="relay-card-url">{relay.url}</p>
+                  <div className="checkbox-grid relay-card-flags">
+                    <label className="checkbox-row">
+                      <input type="checkbox" checked={relay.inbox} readOnly aria-label={`${relayLabel} inbox`} />
+                      <span>Inbox</span>
+                    </label>
+                    <label className="checkbox-row">
+                      <input type="checkbox" checked={relay.outbox} readOnly aria-label={`${relayLabel} outbox`} />
+                      <span>Outbox</span>
+                    </label>
+                  </div>
+                  <div className="action-row">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => handleRemoveRelay(relay.url, relayLabel)}
+                      disabled={isPrimaryRelay}
+                      aria-label={`Remove ${relayLabel}`}
+                    >
+                      {isPrimaryRelay ? "Primary relay" : "Remove relay"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Admin"
+        description={
+          hasOperatorPubkey
+            ? "Operator governance forms, audit history, relay health checks, and privileged relay controls."
+            : "Connect or switch to the relay operator pubkey to unlock admin controls and review relay health."
+        }
+        isOpen={adminOpen}
+        onToggle={() => setAdminOpen((open) => !open)}
+        status={hasOperatorPubkey ? "Operator key detected" : "Locked"}
+      >
+        <article className="feature-card admin-status">
+          <p className="section-label">Admin access</p>
+          <h3>{adminSession ? "Browser signer verified" : "Verify browser signer"}</h3>
+          <p className="muted">
+            Governance requests use NIP-98 on every request. The same signer can also authorize relay and
+            media requests when no local key is active.
           </p>
           <dl className="metric-list">
             <div>
@@ -496,75 +1099,58 @@ export function SettingsRoute() {
             </button>
           </div>
         </article>
-      </div>
 
-      <div className="scene-health">
-        <article>
-          <span>{sceneHealth.healthScore}</span>
-          <p>Health score</p>
-          <small>Scene health from place activity and occupancy.</small>
-        </article>
-        <article>
-          <span>{occupiedSeats}</span>
-          <p>Occupied seats</p>
-          <small>Current occupants across application-defined places.</small>
-        </article>
-        <article>
-          <span>{threads.length}</span>
-          <p>Tracked threads</p>
-          <small>Geo-chat threads visible to the client.</small>
-        </article>
-      </div>
+        {!hasOperatorPubkey ? (
+          <article className="feature-card admin-status">
+            <p className="section-label">Admin locked</p>
+            <h3>Operator pubkey required</h3>
+            <p>
+              Admin controls open once the current session or connected signer matches the relay operator pubkey.
+            </p>
+          </article>
+        ) : null}
 
-      {adminError ? (
-        <article className="feature-card admin-status" role="alert">
-          <p className="section-label">Admin status</p>
-          <h3>Request blocked</h3>
-          <p>{adminError}</p>
-        </article>
-      ) : null}
-
-      {lastMutation ? (
         <article className="feature-card admin-status">
-          <p className="section-label">Last action</p>
-          <h3>Recent admin change</h3>
-          <p>{lastMutation}</p>
-        </article>
-      ) : null}
-
-      <div className="feature-grid">
-        <article className="feature-card">
-          <p className="section-label">Governance surface</p>
-          <h3>Phase 5 controls</h3>
-          <ul className="capability-list">
-            {adminCapabilities.map((capability) => (
-              <li key={capability}>{capability}</li>
-            ))}
-          </ul>
-        </article>
-
-        <article className="feature-card">
-          <p className="section-label">Current session</p>
-          <h3>{currentUser.displayName}</h3>
+          <p className="section-label">Relay health</p>
+          <h3>{health?.relay_name ?? "Synchrono City relay"}</h3>
           <dl className="metric-list">
             <div>
-              <dt>Signed-in pubkey</dt>
-              <dd>{currentUser.pubkey}</dd>
+              <dt>Status</dt>
+              <dd>{health?.status ?? healthError ?? "Checking relay"}</dd>
             </div>
             <div>
-              <dt>Active room</dt>
-              <dd>{activeCall?.roomID ?? "No active room joined"}</dd>
+              <dt>Relay URL</dt>
+              <dd>{health?.relay_url ?? "Unavailable"}</dd>
             </div>
             <div>
-              <dt>Role</dt>
-              <dd>{currentUser.role}</dd>
+              <dt>Operator pubkey</dt>
+              <dd>{health?.operator_pubkey ?? relayOperatorPubkey}</dd>
+            </div>
+            <div>
+              <dt>Last health timestamp</dt>
+              <dd>{health?.timestamp ?? "Pending"}</dd>
             </div>
           </dl>
         </article>
-      </div>
 
-      <div className="admin-grid">
-        <article className="feature-card admin-form">
+        {adminError ? (
+          <article className="feature-card admin-status" role="alert">
+            <p className="section-label">Admin status</p>
+            <h3>Request blocked</h3>
+            <p>{adminError}</p>
+          </article>
+        ) : null}
+
+        {lastMutation ? (
+          <article className="feature-card admin-status">
+            <p className="section-label">Last action</p>
+            <h3>Recent admin change</h3>
+            <p>{lastMutation}</p>
+          </article>
+        ) : null}
+
+        <div className="admin-grid">
+          <article className="feature-card admin-form">
           <p className="section-label">Guest list</p>
           <h3>Allow relay guests</h3>
           <label className="field-stack">
@@ -659,10 +1245,10 @@ export function SettingsRoute() {
             ))}
           </div>
         </article>
-      </div>
+        </div>
 
-      <div className="admin-grid">
-        <form className="feature-card admin-form" onSubmit={(event) => void handleStandingSubmit(event, "assign")}>
+        <div className="admin-grid">
+          <form className="feature-card admin-form" onSubmit={(event) => void handleStandingSubmit(event, "assign")}>
           <p className="section-label">Standing</p>
           <h3>Assign local role</h3>
           <label className="field-stack">
@@ -762,7 +1348,7 @@ export function SettingsRoute() {
               className="field-input"
               value={roomID}
               onChange={(event) => setRoomID(event.target.value)}
-              placeholder="geo:npub1operator:9q8yyk"
+              placeholder="beacon:9q8yyk"
               disabled={!canAdmin || isSavingRoom}
             />
           </label>
@@ -839,10 +1425,10 @@ export function SettingsRoute() {
             ))}
           </div>
         </form>
-      </div>
+        </div>
 
-      <div className="admin-grid">
-        <article className="feature-card admin-form">
+        <div className="admin-grid">
+          <article className="feature-card admin-form">
           <p className="section-label">Proof verification</p>
           <h3>Verify OAuth and social proofs</h3>
           <label className="field-stack">
@@ -998,10 +1584,10 @@ export function SettingsRoute() {
             ))}
           </div>
         </article>
-      </div>
+        </div>
 
-      <div className="admin-grid">
-        <article className="feature-card admin-form">
+        <div className="admin-grid">
+          <article className="feature-card admin-form">
           <p className="section-label">Editorial pins</p>
           <h3>Pin relay notes into Pulse</h3>
           <label className="field-stack">
@@ -1085,70 +1671,259 @@ export function SettingsRoute() {
             Proofs and gate policies feed Concierge relay authorization. Editorial pins are reflected in Pulse after refresh.
           </p>
         </article>
-      </div>
-
-      <section className="feature-card">
-        <div className="detail-header">
-          <div>
-            <p className="section-label">Audit log</p>
-            <h3>Privileged write history</h3>
-          </div>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => void refreshGovernanceData()}
-            disabled={!canAdmin || isRefreshing}
-          >
-            {isRefreshing ? "Refreshing..." : "Refresh audit"}
-          </button>
         </div>
-        {auditPage.entries.length === 0 ? (
-          <p className="muted">
-            {canAdmin ? "No audit entries loaded yet." : "Connect an authorized signer to inspect audit history."}
-          </p>
-        ) : (
-          <>
-            <div className="note-list">
-              {auditPage.entries.map((entry) => (
-                <article key={`${entry.id ?? entry.created_at}-${entry.action}`} className="tile-card audit-entry">
-                  <header>
-                    <div>
-                      <strong>{entry.action}</strong>
-                      <p className="tile-kicker">{entry.created_at ?? "Timestamp unavailable"}</p>
-                    </div>
-                    <span className="thread-pill">{entry.scope}</span>
-                  </header>
-                  <p>
-                    Actor {entry.actor_pubkey}
-                    {entry.target_pubkey ? ` -> ${entry.target_pubkey}` : ""}
-                  </p>
-                  {entry.metadata && Object.keys(entry.metadata).length > 0 ? (
-                    <small>{Object.entries(entry.metadata).map(([key, value]) => `${key}: ${value}`).join(" · ")}</small>
-                  ) : (
-                    <small>No extra metadata</small>
-                  )}
-                </article>
-              ))}
+
+        <section className="feature-card">
+          <div className="detail-header">
+            <div>
+              <p className="section-label">Audit log</p>
+              <h3>Privileged write history</h3>
             </div>
-            <div className="action-row">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => void loadMoreAuditEntries()}
-                disabled={!auditPage.next_cursor || isLoadingAuditMore}
-              >
-                {isLoadingAuditMore ? "Loading..." : auditPage.next_cursor ? "Load more" : "End of audit"}
-              </button>
-            </div>
-          </>
-        )}
-      </section>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void refreshGovernanceData()}
+              disabled={!canAdmin || isRefreshing}
+            >
+              {isRefreshing ? "Refreshing..." : "Refresh audit"}
+            </button>
+          </div>
+          {auditPage.entries.length === 0 ? (
+            <p className="muted">
+              {canAdmin ? "No audit entries loaded yet." : "Connect an authorized signer to inspect audit history."}
+            </p>
+          ) : (
+            <>
+              <div className="note-list">
+                {auditPage.entries.map((entry) => (
+                  <article key={`${entry.id ?? entry.created_at}-${entry.action}`} className="tile-card audit-entry">
+                    <header>
+                      <div>
+                        <strong>{entry.action}</strong>
+                        <p className="tile-kicker">{entry.created_at ?? "Timestamp unavailable"}</p>
+                      </div>
+                      <span className="thread-pill">{entry.scope}</span>
+                    </header>
+                    <p>
+                      Actor {entry.actor_pubkey}
+                      {entry.target_pubkey ? ` -> ${entry.target_pubkey}` : ""}
+                    </p>
+                    {entry.metadata && Object.keys(entry.metadata).length > 0 ? (
+                      <small>{Object.entries(entry.metadata).map(([key, value]) => `${key}: ${value}`).join(" · ")}</small>
+                    ) : (
+                      <small>No extra metadata</small>
+                    )}
+                  </article>
+                ))}
+              </div>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void loadMoreAuditEntries()}
+                  disabled={!auditPage.next_cursor || isLoadingAuditMore}
+                >
+                  {isLoadingAuditMore ? "Loading..." : auditPage.next_cursor ? "Load more" : "End of audit"}
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      </SettingsSection>
+    </section>
+  );
+}
+
+type SettingsSectionProps = {
+  title: string;
+  description: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  status: string;
+  children: ReactNode;
+};
+
+function SettingsSection({ title, description, isOpen, onToggle, status, children }: SettingsSectionProps) {
+  const sectionID = `${title.toLowerCase()}-settings-section`;
+
+  return (
+    <section className="feature-card settings-section">
+      <button
+        className="settings-section-toggle"
+        type="button"
+        onClick={onToggle}
+        aria-label={`Toggle ${title} section`}
+        aria-expanded={isOpen}
+        aria-controls={sectionID}
+      >
+        <div>
+          <p className="section-label">{title}</p>
+          <h3>{title}</h3>
+          <p className="muted">{description}</p>
+        </div>
+        <div className="settings-section-meta">
+          <span className="thread-pill">{status}</span>
+          <span className="settings-section-chevron" aria-hidden="true">
+            {isOpen ? "−" : "+"}
+          </span>
+        </div>
+      </button>
+      {isOpen ? (
+        <div id={sectionID} className="settings-section-body">
+          {children}
+        </div>
+      ) : null}
     </section>
   );
 }
 
 function flag(value: boolean) {
   return value ? "yes" : "no";
+}
+
+function formatRelativeTime(timestamp: string) {
+  const target = new Date(timestamp).getTime();
+
+  if (!Number.isFinite(target)) {
+    return timestamp;
+  }
+
+  const deltaSeconds = Math.max(0, Math.round((Date.now() - target) / 1000));
+
+  if (deltaSeconds < 60) {
+    return "just now";
+  }
+
+  const deltaMinutes = Math.floor(deltaSeconds / 60);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+
+  const deltaDays = Math.floor(deltaHours / 24);
+  if (deltaDays < 30) {
+    return `${deltaDays}d ago`;
+  }
+
+  const deltaMonths = Math.floor(deltaDays / 30);
+  if (deltaMonths < 12) {
+    return `${deltaMonths}mo ago`;
+  }
+
+  const deltaYears = Math.floor(deltaMonths / 12);
+  return `${deltaYears}y ago`;
+}
+
+function getLocalKeyDisplayName(draft: MetadataDraft, key: LocalKeyring["keys"][number]) {
+  const name = draft.name.trim();
+  return name || `Key ${key.publicKeyHex.slice(0, 8)}`;
+}
+
+function truncateMiddle(value: string, leading = 8, trailing = 8) {
+  if (value.length <= leading + trailing) {
+    return value;
+  }
+
+  return `${value.slice(0, leading)}...${value.slice(-trailing)}`;
+}
+
+type KeyAvatarProps = {
+  picture: string;
+  name: string;
+};
+
+function KeyAvatar({ picture, name }: KeyAvatarProps) {
+  if (picture.trim()) {
+    return <img className="participant-avatar" src={picture} alt={`${name} avatar`} />;
+  }
+
+  return (
+    <div className="participant-avatar participant-avatar-fallback" aria-hidden="true">
+      {name.trim().slice(0, 2).toUpperCase()}
+    </div>
+  );
+}
+
+type KeypairTableRowProps = {
+  label: string;
+  value: string;
+  hidden?: boolean;
+  onCopy?: () => void;
+};
+
+function KeypairTableRow({ label, value, hidden = false, onCopy }: KeypairTableRowProps) {
+  return (
+    <tr>
+      <th scope="row">{label}</th>
+      <td>
+        <code className={hidden ? "keypair-value keypair-value-secret" : "keypair-value"}>
+          {hidden ? maskSecretValue(value) : value}
+        </code>
+      </td>
+      <td className="keypair-copy-cell">
+        {onCopy ? (
+          <button
+            className="copy-icon-button"
+            type="button"
+            aria-label={`Copy ${label}`}
+            onClick={onCopy}
+          >
+            <CopyIcon />
+          </button>
+        ) : null}
+      </td>
+    </tr>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <rect x="5" y="3" width="8" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="3" y="5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function maskSecretValue(value: string) {
+  return "*".repeat(Math.max(16, Math.min(value.length, 24)));
+}
+
+function getMetadataDraft(drafts: Record<string, MetadataDraft>, publicKeyNpub: string): MetadataDraft {
+  return (
+    drafts[publicKeyNpub] ?? {
+      name: "",
+      picture: "",
+      about: ""
+    }
+  );
+}
+
+function shouldHydrateMetadataDraft(draft?: MetadataDraft) {
+  return !draft || (draft.name.trim() === "" && draft.picture.trim() === "" && draft.about.trim() === "");
+}
+
+function buildProfileMetadataContent(draft: MetadataDraft): ProfileMetadataContent {
+  const metadata: ProfileMetadataContent = {};
+  const name = draft.name.trim();
+  const picture = draft.picture.trim();
+  const about = draft.about.trim();
+
+  if (name) {
+    metadata.name = name;
+  }
+  if (picture) {
+    metadata.picture = picture;
+  }
+  if (about) {
+    metadata.about = about;
+  }
+
+  return metadata;
 }
 
 function formatAdminError(error: unknown): string {

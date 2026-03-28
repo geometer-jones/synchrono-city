@@ -10,8 +10,11 @@ import (
 )
 
 type Service struct {
-	store          store.Store
-	operatorPubkey string
+	store                  store.Store
+	operatorPubkey         string
+	defaultRoomGrantSource interface {
+		DefaultRoomGrants(roomID string) (bool, bool, bool)
+	}
 }
 
 type Decision struct {
@@ -34,6 +37,12 @@ func NewService(policyStore store.Store, operatorPubkey string) *Service {
 		store:          policyStore,
 		operatorPubkey: operatorPubkey,
 	}
+}
+
+func (s *Service) SetDefaultRoomGrantSource(source interface {
+	DefaultRoomGrants(roomID string) (bool, bool, bool)
+}) {
+	s.defaultRoomGrantSource = source
 }
 
 func (s *Service) CheckAdminAccess(ctx context.Context, subjectPubkey string) Decision {
@@ -125,6 +134,19 @@ func (s *Service) Evaluate(ctx context.Context, subjectPubkey, capability, roomI
 		permission, err := s.store.LatestRoomPermission(ctx, subjectPubkey, roomID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
+				if capability == "media.join" && s.defaultRoomGrantSource != nil {
+					_, canSubscribe, ok := s.defaultRoomGrantSource.DefaultRoomGrants(roomID)
+					if ok && canSubscribe {
+						baseDecision = Decision{
+							Decision:            "allow",
+							Reason:              "room_default_listener",
+							Standing:            standing,
+							Scope:               capability,
+							ProofRequirementMet: true,
+						}
+						return s.applyGatePolicy(ctx, subjectPubkey, capability, standing, assignments, baseDecision)
+					}
+				}
 				return Decision{
 					Decision:            "deny",
 					Reason:              "room_permission_missing",

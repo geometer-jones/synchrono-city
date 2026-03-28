@@ -81,24 +81,47 @@ When a file is uploaded, the client publishes a kind `94` file metadata event co
 
 ## 4. Geospatial Interoperability
 
-The interoperable geospatial surface is geohash-tagged note flow plus relay-local LiveKit room binding.
+The interoperable geospatial surface is beacon-scoped public conversation plus relay-local LiveKit room binding.
 
-### 4.1 Geohash-Scoped Call Binding
+### 4.1 Beacon Binding
 
-- The canonical public precision remains `geohash6` unless a relay exposes a different local policy
-- Clients should treat the longest valid public `g` tag as the canonical tile for note aggregation and room association
+- Public place conversation is organized into NIP-29 groups called beacons
+- The beacon group id is the bare canonical `geohash8`
+- A beacon carries geohash tags for every prefix length from `1` through `8`
+- A beacon is permanently bound to its `geohash8` and must not be moved after creation
+- Interoperability assumes beacon identity at `geohash8`
+- Relays may present coarser discovery surfaces or gate finer-precision creation as local policy, but the interoperable beacon id remains `geohash8`
 - Exact coordinates remain operator-gated and should not be required for baseline interoperability
 
-**Recommended room binding:**
-- Room id shape: relay-local and deterministic, for example `geo:<operator-pubkey>:<geohash>`
-- LiveKit identity: the user's Nostr pubkey
-- Discovery source: active LiveKit membership and/or kind `30311` live activity tagged with the same canonical geohash
+### 4.2 Beacon Posts and Creation
 
-### 4.2 Live Place State
+- Public beacon posts remain kind `1` events
+- The `h` tag is the beacon scope everywhere and must match the beacon id
+- Clients should treat beacon-scoped kind `1` events as belonging to `World`, not to `Pulse`
+- Raw geohash-tagged notes are not the primary public place-conversation model
+
+**Beacon creation:**
+- Beacon creation must be idempotent by `geohash8`
+- If concurrent clients attempt to create the same beacon, the first successful create wins
+- Later concurrent create attempts should return the existing beacon rather than create duplicates
+- Implementations should prefer a create-or-return-existing response over surfacing a terminal duplicate-creation error to the client
+
+### 4.3 Beacon-Scoped Call Binding
+
+- LiveKit room id shape is deterministic: `beacon:<geohash8>`
+- The LiveKit identity is the user's Nostr pubkey
+- Discovery source: active LiveKit membership and/or kind `30311` live activity tagged to the same beacon scope
+
+### 4.4 Live Place State
 
 Synchrono City treats live place participation as relay-local call state rather than as a separate portable Nostr presence artifact.
 
-### 4.3 Private Room Binding (DMs and Group DMs)
+- Concierge and LiveKit are the authority for who is currently present in a beacon-scoped call
+- kind `30311` remains the portable Nostr hint that a live beacon-scoped session exists
+- Clients should not require a separate Nostr presence event to render live place state
+- Clients should derive current place occupancy from active room membership and relay-scoped room discovery
+
+### 4.5 Private Room Binding (DMs and Group DMs)
 
 Private conversations support LiveKit calling with participant-scoped room access.
 
@@ -145,22 +168,14 @@ Private conversations support LiveKit calling with participant-scoped room acces
 - Call offers expire after 5 minutes if not answered
 - Client should show "call missed" notification for expired offers
 
-### 4.4 Live Place State
+### 4.6 Relay Public Rooms
 
-Synchrono City treats live place participation as relay-local call state rather than as a separate portable Nostr presence artifact.
-
-- Concierge and LiveKit are the authority for who is currently present in a geohash-scoped call
-- kind `30311` remains the portable Nostr hint that a live geohash-scoped session exists
-- Clients should not require a separate Nostr presence event to render live place state
-- Clients should derive current place occupancy from active room membership and relay-scoped room discovery
-
-### 4.5 Relay Public Rooms
-
-Relay operators may organize local public conversation around places, venues, neighborhoods, or temporary events without relying on relay-enforced group semantics.
+Relay operators may organize local public conversation around places, venues, neighborhoods, or temporary events through beacon groups while preserving relay-local authority.
 
 - Public chat remains standard Nostr event flow on the relay
-- Moderation policy is enforced by operator controls and Concierge-owned local policy
-- Clients may present place-based public rooms in the UI, but those rooms are an application concept rather than a separate relay protocol
+- Beacon owners and admins may moderate beacon-local membership and conversation through NIP-29 roles
+- Relay policy and relay auth trump beacon-local authority in all conflicts
+- Clients may present beacon-based public rooms in the UI, and those beacons are the canonical public place object
 
 ---
 
@@ -222,7 +237,7 @@ Relays may also apply pubkey-based policy when vending LiveKit tokens.
 
 - Only specific pubkeys may join certain rooms
 - A relay may grant join-only access while withholding publish rights
-- Shared public rooms may require explicit approval before a pubkey can publish audio or video
+- Shared beacon rooms may require explicit approval before a pubkey can publish audio or video
 - Private or community-operated relays may keep lighter rules
 
 ### 5.7 Gate Stacking
@@ -299,7 +314,7 @@ If an operator wants to publish synthesis back onto Nostr in `v1.0-alpha`, it sh
   "tags": [
     ["e", "<event-id-1>"],
     ["e", "<event-id-2>"],
-    ["g", "9q8yyk"]
+    ["h", "9q8yyk12"]
   ]
 }
 ```
@@ -318,11 +333,11 @@ Synchrono City `v1.0-alpha` uses existing Nostr event kinds for the interoperabl
 | Kind | Description | Use Case |
 |------|-------------|----------|
 | `0` | Metadata | User profiles and NIP-05 identifiers |
-| `1` | Note | Public posts, chat-like updates, optional AI synthesis publication |
+| `1` | Note | Public posts, beacon-scoped conversation, optional AI synthesis publication |
 | `3` | Contact list | Following list and social graph |
 | `94` | File metadata | References Blossom-stored media |
 | `27235` | HTTP auth | Authenticate to relay services with NIP-98 |
-| `30311` | Live activity | Advertise active geohash-scoped LiveKit activity for discovery |
+| `30311` | Live activity | Advertise active beacon-scoped LiveKit activity for discovery |
 | `10002` | Relay list | Declare relay read/write preferences |
 | `10063` | Blossom list | Discover where a user hosts files |
 
@@ -351,6 +366,7 @@ All user-supplied input must be validated before processing. Invalid input shoul
 
 **Tag validation:**
 - `g` (geohash): 1-9 alphanumeric chars, must be valid base32 geohash
+- `h` (beacon scope): exactly 8 alphanumeric chars, must be a valid base32 geohash matching a beacon id
 - `p` (pubkey): 64 hex chars
 - `e` (event id): 64 hex chars
 
@@ -359,14 +375,27 @@ All user-supplied input must be validated before processing. Invalid input shoul
 Geohash validation rules:
 - **Format:** 1-9 lowercase alphanumeric characters
 - **Valid chars:** `0123456789bcdefghjkmnpqrstuvwxyz` (base32)
-- **Precision:** Relay may enforce maximum precision (default: geohash6)
+- **Precision:** Relay may enforce maximum precision (default: geohash8)
 - **Boundary:** Coordinates at geohash boundaries should resolve to correct prefix
 
 **On invalid geohash:**
 - If format invalid: reject event with 400
 - If precision exceeds policy: truncate to policy max, accept event
 
-### 8.4 Admin Configuration
+### 8.4 Beacon Scope Tags
+
+Beacon scope validation rules:
+- **Format:** exactly 8 lowercase alphanumeric characters
+- **Valid chars:** `0123456789bcdefghjkmnpqrstuvwxyz` (base32)
+- **Scope:** for beacon-scoped kind `1` events and live-activity hints, `h` must match the target beacon id
+- **Authority:** relay policy may reject beacon-scoped events that reference non-existent or unauthorized beacons
+
+**On invalid beacon scope:**
+- If format invalid: reject event with 400
+- If the target beacon does not exist where existence is required: reject event with 404 or policy-specific denial
+- If the user lacks publish authority for that beacon: reject event with 403
+
+### 8.5 Admin Configuration
 
 Admin config changes require schema validation per field type:
 

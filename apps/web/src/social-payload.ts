@@ -3,7 +3,8 @@ import type {
   FeedSegment,
   GeoNote,
   ParticipantProfile,
-  Place
+  Place,
+  RelayListEntry
 } from "./data";
 
 export type BootstrapPayload = {
@@ -11,11 +12,17 @@ export type BootstrapPayload = {
   relay_operator_pubkey?: string;
   current_user_pubkey?: string;
   relay_url?: string;
+  relay_list?: RelayListEntry[];
   feed_segments?: FeedSegment[];
   cross_relay_items?: CrossRelayFeedItem[];
   places?: Place[];
   profiles?: ParticipantProfile[];
   notes?: GeoNote[];
+};
+
+export type CreateBeaconResponsePayload = {
+  created?: boolean;
+  beacon?: Place;
 };
 
 export type CallIntentPayload = {
@@ -55,13 +62,17 @@ function pickValue(record: unknown, ...keys: string[]) {
   return undefined;
 }
 
-function normalizePlace(place: Place): Place {
+export function normalizePlacePayload(place: Place): Place {
   return {
     geohash: asString(pickValue(place, "geohash")),
     title: asString(pickValue(place, "title")),
     neighborhood: asString(pickValue(place, "neighborhood")),
     description: asString(pickValue(place, "description")),
     activitySummary: asString(pickValue(place, "activitySummary", "activity_summary")),
+    picture: (() => {
+      const value = pickValue(place, "picture", "pic");
+      return value ? asString(value) : undefined;
+    })(),
     tags: asStringArray(pickValue(place, "tags")),
     capacity: asNumber(pickValue(place, "capacity")),
     occupantPubkeys: asStringArray(pickValue(place, "occupantPubkeys", "occupant_pubkeys")),
@@ -97,7 +108,7 @@ function normalizeProfile(profile: ParticipantProfile): ParticipantProfile {
   };
 }
 
-function normalizeNote(note: GeoNote): GeoNote {
+export function normalizeGeoNotePayload(note: GeoNote): GeoNote {
   return {
     id: asString(pickValue(note, "id")),
     geohash: asString(pickValue(note, "geohash")),
@@ -106,6 +117,10 @@ function normalizeNote(note: GeoNote): GeoNote {
     createdAt: asString(pickValue(note, "createdAt", "created_at")),
     replies: asNumber(pickValue(note, "replies"))
   };
+}
+
+export function isValidGeoNote(note: GeoNote) {
+  return note.id.length > 0 && note.geohash.length > 0 && note.authorPubkey.length > 0;
 }
 
 function normalizeFeedSegment(segment: FeedSegment): FeedSegment {
@@ -131,6 +146,15 @@ function normalizeCrossRelayItem(item: CrossRelayFeedItem): CrossRelayFeedItem {
   };
 }
 
+function normalizeRelayListEntry(entry: RelayListEntry): RelayListEntry {
+  return {
+    url: asString(pickValue(entry, "url", "relay_url")),
+    name: asString(pickValue(entry, "name")),
+    inbox: asBoolean(pickValue(entry, "inbox")),
+    outbox: asBoolean(pickValue(entry, "outbox"))
+  };
+}
+
 function filterWithLogging<T>(
   items: T[],
   predicate: (item: T) => boolean,
@@ -151,27 +175,29 @@ export function normalizeBootstrapPayload(payload: BootstrapPayload) {
   const rawFeedSegments = Array.isArray(payload.feed_segments)
     ? payload.feed_segments.map(normalizeFeedSegment)
     : [];
+  const rawRelayList = Array.isArray(payload.relay_list) ? payload.relay_list.map(normalizeRelayListEntry) : [];
   const rawCrossRelayItems = Array.isArray(payload.cross_relay_items)
     ? payload.cross_relay_items.map(normalizeCrossRelayItem)
     : [];
-  const rawPlaces = Array.isArray(payload.places) ? payload.places.map(normalizePlace) : [];
+  const rawPlaces = Array.isArray(payload.places) ? payload.places.map(normalizePlacePayload) : [];
   const rawProfiles = Array.isArray(payload.profiles)
     ? payload.profiles.map(normalizeProfile)
     : [];
-  const rawNotes = Array.isArray(payload.notes) ? payload.notes.map(normalizeNote) : [];
+  const rawNotes = Array.isArray(payload.notes) ? payload.notes.map(normalizeGeoNotePayload) : [];
 
   return {
     relay_name: payload.relay_name,
     relay_operator_pubkey: payload.relay_operator_pubkey,
     current_user_pubkey: asString(payload.current_user_pubkey),
     relay_url: payload.relay_url,
+    relay_list: filterWithLogging(rawRelayList, (relay) => relay.url.length > 0, "relay_list_entry"),
     feed_segments: filterWithLogging(rawFeedSegments, (s) => s.name.length > 0, "feed_segment"),
     cross_relay_items: filterWithLogging(rawCrossRelayItems, (i) => i.id.length > 0, "cross_relay_item"),
     places: filterWithLogging(rawPlaces, (p) => p.geohash.length > 0, "place"),
     profiles: filterWithLogging(rawProfiles, (p) => p.pubkey.length > 0, "profile"),
     notes: filterWithLogging(
       rawNotes,
-      (n) => n.id.length > 0 && n.geohash.length > 0 && n.authorPubkey.length > 0,
+      isValidGeoNote,
       "note"
     )
   };
@@ -183,5 +209,12 @@ export function normalizeCallIntentPayload(payload: CallIntentPayload) {
     room_id: asString(payload.room_id),
     place_title: asString(payload.place_title),
     participant_pubkeys: asStringArray(payload.participant_pubkeys)
+  };
+}
+
+export function normalizeCreateBeaconResponsePayload(payload: CreateBeaconResponsePayload) {
+  return {
+    created: payload.created === true,
+    beacon: payload.beacon ? normalizePlacePayload(payload.beacon) : null
   };
 }

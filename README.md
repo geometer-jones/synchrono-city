@@ -30,7 +30,7 @@ If you prefer to configure manually:
 ```bash
 cp .env.docker.example .env.docker
 # Edit .env.docker with your operator pubkey and secrets
-docker compose up --build
+docker compose --env-file .env.docker up --build
 ```
 
 ---
@@ -39,7 +39,7 @@ docker compose up --build
 
 The repository now includes the Phase 1 foundation, Phase 2 social layer, Phase 3 governance surface, Phase 4 media surface, Phase 5 intelligence surface, and the Phase 6 cross-relay feed surface:
 
-- `apps/web`: React + Vite client with a splash route, application-defined places, geo-chats, Pulse profile/note context, AI synthesis cards with citations, an explainable merged local-plus-remote Pulse feed with explicit relay provenance, rooms-on-map, a global geohash-scoped LiveKit call overlay, Blossom-backed place media uploads, and authenticated governance workflows for guest list, blocklist, standing, proof verification, gate stacking, editorial pinning, room permissions, and audit review
+- `apps/web`: React + Vite client with a splash route, application-defined places, place-based public conversation on the World map, a private `Chats` inbox for DMs and group DMs, Pulse profile/note context, AI synthesis cards with citations, an explainable merged local-plus-remote Pulse feed with explicit relay provenance, rooms-on-map, a global geohash-scoped LiveKit call overlay, Blossom-backed place media uploads, and authenticated governance workflows for guest list, blocklist, standing, proof verification, gate stacking, editorial pinning, room permissions, and audit review
 - `apps/concierge`: Go service with config loading, Postgres-backed policy storage, NIP-98 auth, relay authorization with gate stacking and proof checks, audit logging with cursor pagination, LiveKit token vending, a `strfry` policy shim, and public social/bootstrap and admin governance endpoints that now include cross-relay feed metadata for the web app
 - `db/migrations`: initial Postgres schema for policy, standing, sessions, and audit
 - `runbooks`: operator runbooks from the roadmap
@@ -73,8 +73,24 @@ Connection-pool tuning is controlled through `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_C
 
 ```bash
 cp .env.docker.example .env.docker
-docker compose up --build
+docker compose --env-file .env.docker up --build
 ```
+
+### Local Web Dev Against Docker Backend
+
+Run the backend stack in Docker Compose without the containerized client:
+
+```bash
+pnpm dev:backend
+```
+
+Then run the web client locally with Vite:
+
+```bash
+pnpm dev
+```
+
+In this mode the Vite dev server stays on `http://localhost:5173` and proxies `/api/*` requests to Concierge on `http://localhost:3000`, while the browser still connects directly to the relay (`ws://localhost:8080`), Blossom (`http://localhost:3001`), and LiveKit (`ws://localhost:17880`) using the existing web env values.
 
 ## Documents
 

@@ -37,7 +37,6 @@ Related docs:
 - Circuit breaker for relay failures
 - Geohash tags for all geo events
 - Optimistic locking for admin config
-- Marker clustering for dense areas
 - Geohash-scoped LiveKit room resolution
 - Time-based + cursor pagination
 - [x] Runbooks in repo

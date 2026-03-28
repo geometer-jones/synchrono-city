@@ -337,7 +337,7 @@ When circuit is OPEN:
 | Case | Detection | Response |
 |------|-----------|----------|
 | Invalid geohash format | Regex validation | Reject event with 400, "Invalid geohash format" |
-| Geohash exceeds precision | Length check | Truncate to policy max (default: 6), accept event |
+| Geohash exceeds precision | Length check | Truncate to policy max (default: 8), accept event |
 | Coordinates at boundary | Geohash library handles | Correct prefix returned, normal flow |
 | Empty geohash tag | Missing `g` tag | Accept event (geohash optional) |
 | Multiple geohash tags | Multiple `g` values | Use longest valid as canonical |
@@ -372,11 +372,9 @@ When circuit is OPEN:
 | Marker with call | Integration | Active call + notes -> marker count plus latest-note preview and participant roster |
 | Solo participant availability | Integration | One user in call -> card shows that single participant as available |
 | Zero-note active call | Integration | Active call + zero notes -> marker renders `0` plus participant roster |
-| Clustered calls | Integration | Adjacent active geohashes -> cluster card shows divided per-call sections |
 | Admin non-owner action | Integration | Non-owner tries admin action -> 403 |
 | Concurrent config edit | Integration | Two admins edit same config -> 409 for second |
 | Geohash boundary | Unit | Coordinates at geohash boundary -> correct prefix |
-| Map dense area | Load | 10,000 markers -> clustering activates |
 | Session expiry mid-action | E2E | Session expires during form fill -> graceful re-auth |
 | **DM token non-participant** | Integration | Non-DM-participant requests token -> 403 |
 | **DM room ID tampering** | Integration | Requester modifies room ID -> 403, logged |

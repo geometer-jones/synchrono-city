@@ -31,13 +31,16 @@ type Grants struct {
 }
 
 type TokenService struct {
-	apiKey         string
-	apiSecret      string
-	liveKitURL     string
-	operatorPubkey string
-	tokenTTL       time.Duration
-	store          store.Store
-	now            func() time.Time
+	apiKey                 string
+	apiSecret              string
+	liveKitURL             string
+	operatorPubkey         string
+	tokenTTL               time.Duration
+	store                  store.Store
+	now                    func() time.Time
+	defaultRoomGrantSource interface {
+		DefaultRoomGrants(roomID string) (bool, bool, bool)
+	}
 }
 
 func NewTokenService(cfg config.Config, policyStore store.Store) *TokenService {
@@ -50,6 +53,12 @@ func NewTokenService(cfg config.Config, policyStore store.Store) *TokenService {
 		store:          policyStore,
 		now:            time.Now,
 	}
+}
+
+func (s *TokenService) SetDefaultRoomGrantSource(source interface {
+	DefaultRoomGrants(roomID string) (bool, bool, bool)
+}) {
+	s.defaultRoomGrantSource = source
 }
 
 func (s *TokenService) Issue(ctx context.Context, pubkey, roomID string) (TokenResponse, error) {
@@ -94,6 +103,12 @@ func (s *TokenService) roomGrants(ctx context.Context, pubkey, roomID string) (b
 
 	permission, err := s.store.LatestRoomPermission(ctx, pubkey, roomID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) && s.defaultRoomGrantSource != nil {
+			canPublish, canSubscribe, ok := s.defaultRoomGrantSource.DefaultRoomGrants(roomID)
+			if ok {
+				return canPublish, canSubscribe, nil
+			}
+		}
 		return false, false, ErrPermissionRequired
 	}
 

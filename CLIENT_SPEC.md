@@ -139,16 +139,16 @@ Desired feel:
 Purpose:
 
 - present place activity as the main social surface
-- move between tiles, notes, and live call state
+- move between tiles, beacons, and live call state
 
 Must include:
 
 - map or map-like world surface
 - full-viewport map usage below the app bar
 - pannable and zoomable map interaction
-- selected-place detail
-- room/call affordance
-- note creation and recent note visibility
+- selected-place and selected-beacon detail
+- beacon/call affordance
+- beacon composition and recent beacon activity visibility
 
 Desired feel:
 
@@ -161,82 +161,112 @@ Layout rule:
 - In World, the map owns the screen.
 - The map should fill the available viewport beneath the app bar.
 - The map must remain pannable and zoomable while the user is in World.
-- Place detail, room actions, note composition, and recent activity should appear as overlays, sheets, drawers, or anchored cards on top of the map rather than as stacked panels that push the map down the page.
+- Place detail, beacon actions, beacon composition, and recent activity should appear as overlays, sheets, drawers, or anchored cards on top of the map rather than as stacked panels that push the map down the page.
 - The app bar is the only persistent non-overlay chrome that should reduce map height.
+
+Beacon contract:
+
+- Public place conversation is organized into NIP-29 groups called beacons.
+- The stable id of a beacon is the canonical `geohash8` for that place.
+- Each beacon should carry geohash tags for every prefix length from `1` through `8`.
+- A beacon is permanently bound to its `geohash8` and must not be moved to a different tile after creation.
+- The beacon, not the bare map tile, is the public social container for posts, membership, moderation, and LiveKit activity.
+- LiveKit calls happen within the selected beacon context rather than as a standalone geohash room entered directly from the map.
+- The LiveKit room id for a beacon should be `beacon:<geohash8>`.
+- Beacon moderation is owned by the beacon's NIP-29 admins and owners.
+- Relay policy and relay auth must override beacon-local moderation decisions when they conflict.
+
+Beacon post contract:
+
+- Public beacon posts remain kind `1` events.
+- Beacon posts must be scoped to the selected beacon through an `h` tag that matches the beacon id.
+- The client should treat kind `1` events tagged to the active beacon as that beacon's public conversation stream.
+- The client should not treat raw geohash-tagged kind `1` notes as the primary public conversation model for World.
+- Beacon-scoped kind `1` events should remain in `World` and should not be routed into `Pulse`.
 
 Marker contract:
 
-- Markers aggregate by canonical geohash tile.
-- Render one marker per visible tile with activity.
-- A tile with neither notes nor an active call should render no marker.
-- The marker shape should remain a simple circle unless clustering or another explicit map-density rule requires otherwise.
-- The numeral inside the marker is the count of kind `1` notes for that tile only.
-- If a tile has an active call and zero notes, the marker should still render and should display `0`.
-- Marker styling may communicate live-call presence, but the number itself should not include participant count.
-- Tapping or clicking a marker sets the user's active place presence to that exact geohash tile.
-- Selecting a marker should immediately initiate the join flow for that tile's call/presence context.
-- Marker selection should not require a secondary confirmation step before joining.
-- After selection, tile detail should appear in an overlay, anchored card, sheet, or equivalent map-layer surface without giving up the full-screen map.
-- Marker-driven detail must preserve a fast path into the exact geohash conversation after presence has been set.
+- Markers aggregate by canonical geohash tile and its corresponding beacon.
+- Render one marker per visible beacon.
+- A tile with no beacon should render no marker.
+- Markers should present the beacon avatar as the primary visual identity.
+- If no avatar exists, the marker should fall back to a stable placeholder treatment derived from beacon metadata.
+- Marker styling may communicate live-call presence, but markers should not display post counts or participant counts.
+- Tapping or clicking a marker selects the beacon for that exact geohash tile.
+- Selecting a marker should immediately open that beacon's context, but should not auto-join LiveKit just because the map was clicked.
+- Marker selection should not require a secondary confirmation step before entering the beacon context.
+- After selection, beacon detail should appear in an anchored card behind the avatar marker without giving up the full-screen map.
+- Marker-driven detail must preserve a fast path into the exact beacon conversation and its call controls after presence has been set.
 - Marker placement must stay anchored to the map as the user pans or zooms.
 
 Map click contract:
 
-- Clicking the map background relocates the user's presence to the nearest `geohash6` for that click.
-- A background map click should immediately join the room for that clicked geohash.
-- The join path should use the default relay's LiveKit room/token flow when that is available.
-- A background map click is distinct from clicking a marker or cluster.
+- Clicking empty map background resolves the nearest `geohash8`, drops a temporary pin, and opens a bottom overlay.
+- The initial bottom overlay state should offer exactly two actions: `Light Beacon` and `Cancel`.
+- `Cancel` should dismiss the pin and close the bottom overlay without changing call state.
+- `Light Beacon` should replace the action state with a beacon-creation form in the same bottom overlay.
+- If a beacon already exists for the resolved `geohash8`, the client should open that existing beacon rather than offering duplicate creation.
+- A background map click is distinct from clicking a marker.
+
+Beacon creation overlay contract:
+
+- The beacon-creation form should include `name`, `pic`, and `about` fields.
+- The creation form should expose `Submit` and `Cancel` actions.
+- `Submit` should create the beacon bound to the pinned `geohash8` and then open that beacon context.
+- Beacon creation should be idempotent at the `geohash8` level: if another client creates the beacon first, submit should return and open the existing beacon instead of surfacing a duplicate-creation error.
+- `Cancel` should close the creation form and remove the temporary pin.
+- The creation UI should make it clear that the beacon will be permanently bound to that location once created.
 
 Marker click contract:
 
-- Clicking a numbered marker relocates the user's presence to that marker's exact geohash tile.
-- Marker click should immediately join the room for that marker geohash.
+- Clicking a beacon marker selects that marker's exact beacon.
+- Marker click should open beacon detail and expose call controls scoped to that beacon rather than immediately joining media.
 
 Marker card contract:
 
-- The marker detail surface represents exactly one geohash tile unless clustering is active.
-- It should make the selected place/presence state obvious.
-- It should show the latest note preview for that exact geohash when one exists.
-- It should show the current participant roster for that tile when a call is active.
+- The marker detail surface represents exactly one beacon and its geohash tile.
+- It should make the selected place, beacon identity, and beacon moderation context obvious.
+- The card's top-left corner should be anchored at the visual center of the beacon avatar.
+- The card should sit behind the avatar marker using z-index so the avatar remains the foreground anchor.
+- It should show the beacon avatar, beacon name, and beacon about text.
+- It should show beacon counters inside the card rather than inside the marker, including at minimum total beacon posts and live participant count.
+- It should show the latest beacon activity preview for that exact beacon when one exists.
+- It should show the current participant roster for that beacon when a call is active.
 - Participant rows should expose media-state indicators for mic, camera, screenshare, and deafen.
 - Profile inspection from the marker detail surface should route into Pulse.
-
-Clustering contract:
-
-- Dense areas may cluster adjacent tiles for readability.
-- Cluster counts should sum note counts across included tiles.
-- Cluster behavior should respond to zoom level and dissolve as the user zooms in.
-- Clicking a cluster should zoom in toward the clustered tiles and should not relocate user presence.
-- Cluster expansion must preserve per-tile call state.
-- Cluster detail should keep underlying tiles legible rather than flattening them into one synthetic place.
 
 ### Chats `/app/chats`
 
 Purpose:
 
-- show thread inventory and selected conversation detail
+- show the private inbox for direct messages and group DMs
 
 Must include:
 
-- geo-chat emphasis
-- clear distinction between public place threads and private threads
-- fast movement into related profile/note context when relevant
+- clear distinction between DM threads and group DM threads
+- active-call visibility for private threads
+- obvious routing back to `World` and `Pulse` for public place context
 
 Desired feel:
 
-- conversational, but still anchored to location and scene memory
+- conversational and private, without duplicating the public place surface
 
 ### Pulse `/app/pulse`
 
 Purpose:
 
-- inspect people and note context
+- inspect people and non-beacon note context
 
 Must include:
 
 - profile context
-- authored notes or note detail context
+- authored notes or note detail context for non-beacon public events
 - relationship back to place and thread surfaces
+
+Behavior rules:
+
+- Beacon-scoped posts identified by beacon `h` tags do not open in `Pulse`.
+- `Pulse` may expose author profiles for people active in beacons, but the beacon conversation itself stays in `World`.
 
 Desired feel:
 
@@ -247,13 +277,29 @@ Desired feel:
 
 Purpose:
 
-- expose governance and operator controls
+- expose client identity controls, relay context, and operator controls
 
 Must include:
 
+- three independently collapsible sections: `Keys`, `Relays`, `Admin`
+- `Keys` support for generating local Nostr keypairs
+- `Keys` support for importing existing private keys (`nsec` or 64-char hex)
+- `Keys` support for holding multiple local keypairs in an in-browser keyring
+- `Keys` support for selecting which stored local keypair is currently active
+- `Keys` support for removing individual local keypairs and clearing the full keyring
+- visible session identity state showing whether the client is using relay bootstrap identity or a locally managed key
+- generated/imported key material shown back for the active local keypair so it can be copied or recovered
 - policy and standing workflows
 - room permission workflows
 - audit visibility
+
+Behavior rules:
+
+- `Keys` and `Relays` are always available.
+- `Admin` remains a distinct section within Settings instead of a separate product surface.
+- `Admin` should open automatically when the current session or connected signer matches the relay operator pubkey.
+- Local keys affect the in-app client identity used for notes and place presence; the app may store multiple keypairs but only one local keypair is active at a time.
+- Privileged admin signing may still rely on the browser signer flow.
 
 Desired feel:
 

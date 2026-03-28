@@ -25,7 +25,11 @@ RUN git clone --depth=1 https://github.com/hoytech/strfry.git /src/strfry && \
 FROM ubuntu:24.04
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates bash && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  bash \
+  ca-certificates \
+  liblmdb0 \
+  libsecp256k1-1 && \
   rm -rf /var/lib/apt/lists/*
 
 COPY --from=strfry-builder /src/strfry/strfry /usr/local/bin/strfry

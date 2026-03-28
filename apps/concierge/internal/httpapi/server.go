@@ -21,29 +21,41 @@ import (
 
 const maxJSONBodyBytes = 1 << 20
 
+const corsAllowedMethods = "GET, POST, OPTIONS"
+const corsAllowedHeaders = "Authorization, Content-Type"
+const corsMaxAgeSeconds = "600"
+
 type Server struct {
-	config        config.Config
-	mux           *http.ServeMux
-	store         store.Store
-	authVerifier  *nip98.Verifier
-	tokenService  *scLiveKit.TokenService
-	policyService *policy.Service
-	relayAuth     *relayauth.Evaluator
-	socialService *social.Service
-	adminLimiter  *rateLimiter
+	config                       config.Config
+	mux                          *http.ServeMux
+	store                        store.Store
+	authVerifier                 *nip98.Verifier
+	tokenService                 *scLiveKit.TokenService
+	participantPermissionUpdater scLiveKit.ParticipantPermissionUpdater
+	policyService                *policy.Service
+	relayAuth                    *relayauth.Evaluator
+	socialService                *social.Service
+	adminLimiter                 *rateLimiter
 }
 
 func NewServer(cfg config.Config, policyStore store.Store) *Server {
+	socialService := social.NewService(cfg.PrimaryOperatorPub, cfg.RelayName, cfg.PrimaryRelayURL, policyStore)
+	tokenService := scLiveKit.NewTokenService(cfg, policyStore)
+	tokenService.SetDefaultRoomGrantSource(socialService)
+	policyService := policy.NewService(policyStore, cfg.PrimaryOperatorPub)
+	policyService.SetDefaultRoomGrantSource(socialService)
+
 	s := &Server{
-		config:        cfg,
-		mux:           http.NewServeMux(),
-		store:         policyStore,
-		authVerifier:  nip98.NewVerifier(),
-		tokenService:  scLiveKit.NewTokenService(cfg, policyStore),
-		policyService: policy.NewService(policyStore, cfg.PrimaryOperatorPub),
-		relayAuth:     relayauth.NewEvaluator(policy.NewService(policyStore, cfg.PrimaryOperatorPub)),
-		socialService: social.NewService(cfg.PrimaryOperatorPub, cfg.RelayName, cfg.PrimaryRelayURL, policyStore),
-		adminLimiter:  newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
+		config:                       cfg,
+		mux:                          http.NewServeMux(),
+		store:                        policyStore,
+		authVerifier:                 nip98.NewVerifier(),
+		tokenService:                 tokenService,
+		participantPermissionUpdater: scLiveKit.NewParticipantPermissionUpdater(cfg),
+		policyService:                policyService,
+		relayAuth:                    relayauth.NewEvaluator(policyService),
+		socialService:                socialService,
+		adminLimiter:                 newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
 	}
 
 	s.routes()
@@ -51,13 +63,14 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return withCORS(s.mux)
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/token", s.handleToken)
 	s.mux.HandleFunc("/api/v1/social/bootstrap", s.handleSocialBootstrap)
+	s.mux.HandleFunc("/api/v1/social/beacons", s.handleSocialBeacons)
 	s.mux.HandleFunc("/api/v1/social/notes", s.handleSocialNotes)
 	s.mux.HandleFunc("/api/v1/social/call-intent", s.handleSocialCallIntent)
 	s.mux.HandleFunc("/api/v1/admin/policy/check", s.handleAdminPolicyCheck)
@@ -72,6 +85,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/internal/relay/authorize", s.handleInternalRelayAuthorize)
 }
 
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)
+		w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+		w.Header().Set("Access-Control-Max-Age", corsMaxAgeSeconds)
+		w.Header().Add("Vary", "Origin")
+		w.Header().Add("Vary", "Access-Control-Request-Method")
+		w.Header().Add("Vary", "Access-Control-Request-Headers")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handleSocialBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
@@ -79,6 +111,44 @@ func (s *Server) handleSocialBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, s.socialService.Bootstrap())
+}
+
+func (s *Server) handleSocialBeacons(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	var request struct {
+		Geohash string   `json:"geohash"`
+		Name    string   `json:"name"`
+		Picture string   `json:"pic"`
+		About   string   `json:"about"`
+		Tags    []string `json:"tags"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	result, err := s.socialService.CreateOrReturnBeacon(
+		strings.TrimSpace(request.Geohash),
+		request.Name,
+		request.Picture,
+		request.About,
+		request.Tags,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	status := http.StatusCreated
+	if !result.Created {
+		status = http.StatusOK
+	}
+
+	writeJSON(w, status, result)
 }
 
 func (s *Server) handleSocialNotes(w http.ResponseWriter, r *http.Request) {
@@ -426,7 +496,30 @@ func (s *Server) handleAdminRoomPermissions(w http.ResponseWriter, r *http.Reque
 	})
 	s.logAuditFailure(auditErr)
 
-	writeJSON(w, http.StatusCreated, record)
+	response := struct {
+		store.RoomPermission
+		LiveSyncApplied bool   `json:"live_sync_applied,omitempty"`
+		LiveSyncWarning string `json:"live_sync_warning,omitempty"`
+	}{
+		RoomPermission: record,
+	}
+
+	if s.participantPermissionUpdater != nil {
+		syncErr := s.participantPermissionUpdater.UpdateParticipantPermission(r.Context(), request.RoomID, request.SubjectPubkey, scLiveKit.ParticipantPermission{
+			CanPublish:   !request.Revoked && request.CanPublish,
+			CanSubscribe: !request.Revoked && request.CanSubscribe,
+		})
+		switch {
+		case syncErr == nil:
+			response.LiveSyncApplied = true
+		case errors.Is(syncErr, scLiveKit.ErrParticipantNotConnected):
+			// Permission still applies on the next join; no live warning needed.
+		default:
+			response.LiveSyncWarning = syncErr.Error()
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) handleAdminProofs(w http.ResponseWriter, r *http.Request) {

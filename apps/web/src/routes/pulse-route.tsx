@@ -1,6 +1,8 @@
 import { Link, useSearchParams } from "react-router-dom";
 
 import { useAppState } from "../app-state";
+import { buildCohortBeaconMetadata } from "../beacon-metadata";
+import { isBeaconThreadNote, listPulseLocalNotes } from "../data";
 
 export function PulseRoute() {
   const [searchParams] = useSearchParams();
@@ -14,19 +16,21 @@ export function PulseRoute() {
     joinPlaceCall,
     listNotesByAuthor,
     listRecentNotes,
+    notes,
     places,
     pulseFeedItems,
     relaySyntheses
   } = useAppState();
 
   const note = getNote(searchParams.get("note") ?? "");
-  const profile = getProfile(searchParams.get("profile") ?? "");
-  const noteAuthor = note ? getProfile(note.authorPubkey) : undefined;
   const notePlace = note ? getPlace(note.geohash) : undefined;
+  const noteStaysInWorld = note ? isBeaconThreadNote(note, places) : false;
+  const noteAuthor = note ? getProfile(note.authorPubkey) : undefined;
+  const profile = getProfile(searchParams.get("profile") ?? "");
   const profileNotes = profile ? listNotesByAuthor(profile.pubkey) : [];
   const profilePlace = profile?.homeGeohash ? getPlace(profile.homeGeohash) : undefined;
   const profileParticipants = profilePlace ? getPlaceParticipants(profilePlace.geohash) : [];
-  const recentNotes = listRecentNotes();
+  const recentNotes = listPulseLocalNotes(places, notes);
   const mergedFeedCount = pulseFeedItems.length;
   const visibleRelayCount = new Set(pulseFeedItems.map((item) => item.relayName)).size;
   const laneCounts = pulseFeedItems.reduce<Record<string, number>>((counts, item) => {
@@ -43,13 +47,19 @@ export function PulseRoute() {
       return {
         place,
         note: pinnedNote,
-        author: getProfile(pinnedNote.authorPubkey)
+        author: getProfile(pinnedNote.authorPubkey),
+        cohort: buildCohortBeaconMetadata(
+          place,
+          pinnedNote,
+          notes.filter((note) => note.geohash === place.geohash)
+        )
       };
     })
     .filter((entry): entry is {
       place: typeof places[number];
       note: NonNullable<ReturnType<typeof getNote>>;
       author: ReturnType<typeof getProfile>;
+      cohort: ReturnType<typeof buildCohortBeaconMetadata>;
     } => Boolean(entry));
 
   function describeFeedLane(name: string) {
@@ -83,7 +93,36 @@ export function PulseRoute() {
         </div>
       </div>
 
-      {note ? (
+      {note && noteStaysInWorld ? (
+        <article className="feature-card">
+          <div className="detail-header">
+            <div>
+              <p className="section-label">World</p>
+              <h3>Beacon conversation stays in World</h3>
+            </div>
+            <Link
+              className="secondary-link"
+              to={`/app?beacon=${encodeURIComponent(note.geohash)}`}
+            >
+              Open beacon
+            </Link>
+          </div>
+          <p>
+            Pulse keeps profile and cross-relay context. Open {notePlace?.title ?? note.geohash} to read or reply to
+            this beacon thread.
+          </p>
+          <div className="action-row pulse-card-actions">
+            {noteAuthor ? (
+              <Link
+                className="secondary-link"
+                to={`/app/pulse?profile=${encodeURIComponent(note.authorPubkey)}`}
+              >
+                View profile
+              </Link>
+            ) : null}
+          </div>
+        </article>
+      ) : note ? (
         <article className="feature-card">
           <div className="detail-header">
             <div>
@@ -92,7 +131,7 @@ export function PulseRoute() {
             </div>
             <Link
               className="secondary-link"
-              to={`/app/chats?geohash=${encodeURIComponent(note.geohash)}`}
+              to={`/app?beacon=${encodeURIComponent(note.geohash)}`}
             >
               Back to {note.geohash}
             </Link>
@@ -114,9 +153,9 @@ export function PulseRoute() {
             {profilePlace ? (
               <Link
                 className="secondary-link"
-                to={`/app/chats?geohash=${encodeURIComponent(profilePlace.geohash)}`}
+                to={`/app?beacon=${encodeURIComponent(profilePlace.geohash)}`}
               >
-                Open {profilePlace.geohash}
+                Open beacon
               </Link>
             ) : null}
           </div>
@@ -156,9 +195,9 @@ export function PulseRoute() {
                   <strong>{getPlace(profileNote.geohash)?.title ?? profileNote.geohash}</strong>
                   <Link
                     className="secondary-link"
-                    to={`/app/chats?geohash=${encodeURIComponent(profileNote.geohash)}`}
+                    to={`/app?beacon=${encodeURIComponent(profileNote.geohash)}`}
                   >
-                    Open chat
+                    Open beacon
                   </Link>
                 </header>
                 <p>{profileNote.content}</p>
@@ -200,17 +239,17 @@ export function PulseRoute() {
                       <Link
                         key={sourceNote.id}
                         className="secondary-link"
-                        to={`/app/pulse?note=${encodeURIComponent(sourceNote.id)}`}
+                        to={`/app?beacon=${encodeURIComponent(sourceNote.geohash)}`}
                       >
-                        Cite {sourceAuthor?.displayName ?? sourceNote.authorPubkey}
+                        Source beacon · {sourceAuthor?.displayName ?? sourceNote.authorPubkey}
                       </Link>
                     ) : null;
                   })}
                   <Link
                     className="secondary-link"
-                    to={`/app/chats?geohash=${encodeURIComponent(synthesis.geohash)}`}
+                    to={`/app?beacon=${encodeURIComponent(synthesis.geohash)}`}
                   >
-                    Open chat
+                    Open beacon
                   </Link>
                 </div>
               </article>
@@ -266,9 +305,9 @@ export function PulseRoute() {
                     {matchingPlace ? (
                       <Link
                         className="secondary-link"
-                        to={`/app/chats?geohash=${encodeURIComponent(item.geohash)}`}
+                        to={`/app?beacon=${encodeURIComponent(item.geohash)}`}
                       >
-                        {item.local ? "Open chat" : "Compare local chat"}
+                        {item.local ? "Open beacon" : "Compare local beacon"}
                       </Link>
                     ) : null}
                     {matchingProfile ? (
@@ -304,21 +343,37 @@ export function PulseRoute() {
                     <strong>{entry.place.title}</strong>
                     <p className="tile-kicker">{entry.author?.displayName ?? entry.note.authorPubkey}</p>
                   </div>
-                  <span className="thread-pill">Pinned</span>
+                  <div className="route-header-meta">
+                    <span className="thread-pill">Pinned</span>
+                    {entry.cohort ? <span className="thread-pill">Cohort</span> : null}
+                    {entry.cohort?.weekLabel ? <span className="thread-pill live">{entry.cohort.weekLabel}</span> : null}
+                  </div>
                 </header>
-                <p>{entry.note.content}</p>
+                {entry.cohort ? (
+                  <>
+                    <p>{entry.cohort.summary ?? entry.note.content}</p>
+                    <small>
+                      {entry.cohort.currentConcept ?? "Pinned note sets the current concept."}
+                      {entry.cohort.nextSession ? ` Next: ${entry.cohort.nextSession}` : ""}
+                    </small>
+                  </>
+                ) : (
+                  <p>{entry.note.content}</p>
+                )}
                 <div className="action-row pulse-card-actions">
+                  {entry.author ? (
+                    <Link
+                      className="secondary-link"
+                      to={`/app/pulse?profile=${encodeURIComponent(entry.note.authorPubkey)}`}
+                    >
+                      View author
+                    </Link>
+                  ) : null}
                   <Link
                     className="secondary-link"
-                    to={`/app/pulse?note=${encodeURIComponent(entry.note.id)}`}
+                    to={`/app?beacon=${encodeURIComponent(entry.place.geohash)}`}
                   >
-                    Review pin
-                  </Link>
-                  <Link
-                    className="secondary-link"
-                    to={`/app/chats?geohash=${encodeURIComponent(entry.place.geohash)}`}
-                  >
-                    Open chat
+                    Open beacon
                   </Link>
                 </div>
               </article>
@@ -327,19 +382,34 @@ export function PulseRoute() {
         </section>
       ) : null}
 
-      <div className="tile-list">
-        {feedSegments.map((segment) => (
-          <article key={segment.name} className="tile-card pulse-card">
-            <header>
-              <div>
-                <strong>{segment.name}</strong>
-                <p className="tile-kicker">{describeFeedLane(segment.name)}</p>
-              </div>
-            </header>
-            <p>{segment.description}</p>
-          </article>
-        ))}
-      </div>
+      {feedSegments.length > 0 ? (
+        <div className="tile-list">
+          {feedSegments.map((segment) => (
+            <article key={segment.name} className="tile-card pulse-card">
+              <header>
+                <div>
+                  <strong>{segment.name}</strong>
+                  <p className="tile-kicker">{describeFeedLane(segment.name)}</p>
+                </div>
+              </header>
+              <p>{segment.description}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
+      {!note &&
+      !profile &&
+      relaySyntheses.length === 0 &&
+      pulseFeedItems.length === 0 &&
+      pinnedNotes.length === 0 &&
+      feedSegments.length === 0 ? (
+        <article className="feature-card">
+          <p className="section-label">Pulse</p>
+          <h3>No feed activity yet.</h3>
+          <p className="muted">Profiles, syntheses, relay feed lanes, and editorial picks will appear here after the relay publishes them.</p>
+        </article>
+      ) : null}
     </section>
   );
 }

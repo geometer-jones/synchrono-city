@@ -1,6 +1,7 @@
 package social
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,15 @@ func TestBootstrap(t *testing.T) {
 		}
 		if resp.RelayURL != "wss://test-relay.example" {
 			t.Errorf("expected RelayURL wss://test-relay.example, got %s", resp.RelayURL)
+		}
+		if len(resp.RelayList) != 1 {
+			t.Fatalf("expected one relay list entry, got %d", len(resp.RelayList))
+		}
+		if resp.RelayList[0].URL != "wss://test-relay.example" {
+			t.Errorf("expected relay list URL wss://test-relay.example, got %s", resp.RelayList[0].URL)
+		}
+		if !resp.RelayList[0].Inbox || !resp.RelayList[0].Outbox {
+			t.Errorf("expected primary relay inbox/outbox flags to default true, got %+v", resp.RelayList[0])
 		}
 	})
 
@@ -206,10 +216,20 @@ func TestCreateNote(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects unknown place", func(t *testing.T) {
-		_, err := svc.CreateNote("unknown", "npub1author", "content")
-		if err != ErrUnknownPlace {
-			t.Errorf("expected ErrUnknownPlace, got %v", err)
+	t.Run("creates an ad-hoc place for an unknown geohash", func(t *testing.T) {
+		note, err := svc.CreateNote("9q8yyz", "npub1author", "content")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if note.Geohash != "9q8yyz" {
+			t.Errorf("expected geohash 9q8yyz, got %s", note.Geohash)
+		}
+		place, ok := svc.placeByGeohashLocked("9q8yyz")
+		if !ok {
+			t.Fatal("expected ad-hoc place to be created")
+		}
+		if place.Title != "Field tile 9q8yyz" {
+			t.Errorf("expected ad-hoc place title, got %s", place.Title)
 		}
 	})
 
@@ -230,6 +250,94 @@ func TestCreateNote(t *testing.T) {
 			t.Errorf("expected new note at front, got %s", svc.notes[0].ID)
 		}
 	})
+}
+
+func TestCreateOrReturnBeacon(t *testing.T) {
+	svc := &Service{
+		operatorPubkey:    "npub1operator",
+		currentUserPubkey: DefaultCurrentUserPubkey,
+		places:            []Place{},
+	}
+
+	t.Run("creates a new beacon for an empty geohash", func(t *testing.T) {
+		result, err := svc.CreateOrReturnBeacon(
+			"9q8yyk34",
+			"Lantern Point",
+			"https://example.com/beacon.png",
+			"Meet after sunset.",
+			[]string{"cohort", "curriculum:zero-to-hero", "cohort"},
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Created {
+			t.Fatal("expected created beacon result")
+		}
+		if result.Beacon.Geohash != "9q8yyk34" {
+			t.Fatalf("expected beacon geohash 9q8yyk34, got %s", result.Beacon.Geohash)
+		}
+		if result.Beacon.Title != "Lantern Point" {
+			t.Fatalf("expected beacon title, got %s", result.Beacon.Title)
+		}
+		if result.Beacon.Picture != "https://example.com/beacon.png" {
+			t.Fatalf("expected beacon picture, got %s", result.Beacon.Picture)
+		}
+		if result.Beacon.Description != "Meet after sunset." {
+			t.Fatalf("expected beacon description, got %s", result.Beacon.Description)
+		}
+		if !slices.Equal(result.Beacon.Tags, []string{"beacon", "geohash8", "cohort", "curriculum:zero-to-hero"}) {
+			t.Fatalf("unexpected beacon tags: %+v", result.Beacon.Tags)
+		}
+	})
+
+	t.Run("returns the existing beacon instead of creating a duplicate", func(t *testing.T) {
+		result, err := svc.CreateOrReturnBeacon("9q8yyk34", "Duplicate", "", "Ignored", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Created {
+			t.Fatal("expected existing beacon result")
+		}
+		if result.Beacon.Title != "Lantern Point" {
+			t.Fatalf("expected original beacon title, got %s", result.Beacon.Title)
+		}
+		if len(svc.places) != 1 {
+			t.Fatalf("expected one stored beacon, got %d", len(svc.places))
+		}
+	})
+
+	t.Run("rejects creating a new beacon without a name", func(t *testing.T) {
+		_, err := svc.CreateOrReturnBeacon("9q8yyk99", "   ", "", "", nil)
+		if err != ErrEmptyBeaconName {
+			t.Fatalf("expected ErrEmptyBeaconName, got %v", err)
+		}
+	})
+}
+
+func TestDefaultRoomGrants(t *testing.T) {
+	svc := &Service{
+		places: []Place{
+			{
+				Geohash: "9q8yyk34",
+				Title:   "Hybrid study room",
+				Tags:    []string{"beacon", "cohort", "curriculum:zero-to-hero"},
+			},
+			{
+				Geohash: "9q8yyk55",
+				Title:   "Plain beacon",
+				Tags:    []string{"beacon"},
+			},
+		},
+	}
+
+	canPublish, canSubscribe, ok := svc.DefaultRoomGrants("beacon:9q8yyk34")
+	if !ok || canPublish || !canSubscribe {
+		t.Fatalf("expected cohort beacon listener grants, got ok=%t publish=%t subscribe=%t", ok, canPublish, canSubscribe)
+	}
+
+	if _, _, ok := svc.DefaultRoomGrants("beacon:9q8yyk55"); ok {
+		t.Fatal("expected plain beacon to require explicit room permission")
+	}
 }
 
 func TestResolveCallIntent(t *testing.T) {
@@ -253,8 +361,8 @@ func TestResolveCallIntent(t *testing.T) {
 		if intent.Geohash != "9q8yyk" {
 			t.Errorf("expected geohash 9q8yyk, got %s", intent.Geohash)
 		}
-		if intent.RoomID != "geo:npub1operator:9q8yyk" {
-			t.Errorf("expected roomID geo:npub1operator:9q8yyk, got %s", intent.RoomID)
+		if intent.RoomID != "beacon:9q8yyk" {
+			t.Errorf("expected roomID beacon:9q8yyk, got %s", intent.RoomID)
 		}
 		if intent.PlaceTitle != "Test Place" {
 			t.Errorf("expected placeTitle Test Place, got %s", intent.PlaceTitle)
@@ -316,7 +424,7 @@ func TestResolveCallIntent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if intent.RoomID != "geo:npub1operator:9q8yyz" {
+		if intent.RoomID != "beacon:9q8yyz" {
 			t.Fatalf("expected ad-hoc room id, got %s", intent.RoomID)
 		}
 		if intent.PlaceTitle != "Field tile 9q8yyz" {
@@ -337,7 +445,7 @@ func TestResolveCallIntent(t *testing.T) {
 
 func TestResolveRoomID(t *testing.T) {
 	result := ResolveRoomID("npub1operator", "9q8yyk")
-	if result != "geo:npub1operator:9q8yyk" {
-		t.Errorf("expected geo:npub1operator:9q8yyk, got %s", result)
+	if result != "beacon:9q8yyk" {
+		t.Errorf("expected beacon:9q8yyk, got %s", result)
 	}
 }

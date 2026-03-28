@@ -10,14 +10,13 @@ storage:
   removeWhenNoOwners: false
   local:
     dir: /data/blobs
-
-rules:
-  - type: "image/*"
-    expiration: 1 week
-  - type: "video/*"
-    expiration: 5 days
-  - type: "*"
-    expiration: 2 days
+  rules:
+    - type: "image/*"
+      expiration: 1 week
+    - type: "video/*"
+      expiration: 5 days
+    - type: "*"
+      expiration: 2 days
 
 upload:
   enabled: true

@@ -10,7 +10,9 @@ export class ApiError extends Error {
   }
 }
 
-const conciergeBaseUrl = import.meta.env.VITE_CONCIERGE_URL ?? "";
+// In local Vite dev we proxy API requests through the dev server to avoid
+// cross-origin requests to the Dockerized Concierge backend.
+const conciergeBaseUrl = import.meta.env.DEV ? "" : (import.meta.env.VITE_CONCIERGE_URL ?? "");
 
 export function resolveApiURL(path: string): URL {
   return new URL(path, conciergeBaseUrl || window.location.origin);
@@ -26,15 +28,36 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   });
 
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
+  const data = parseResponseBody(text);
 
   if (!response.ok) {
-    const message =
-      typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message: unknown }).message)
-        : `Request failed with status ${response.status}`;
-    throw new ApiError(message, response.status, data);
+    throw new ApiError(formatResponseErrorMessage(data, response.status), response.status, data);
   }
 
   return data as T;
+}
+
+function parseResponseBody(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+function formatResponseErrorMessage(data: unknown, status: number) {
+  if (typeof data === "string" && data.length > 0) {
+    return data;
+  }
+
+  if (typeof data === "object" && data !== null && "message" in data) {
+    return String((data as { message: unknown }).message);
+  }
+
+  return `Request failed with status ${status}`;
 }

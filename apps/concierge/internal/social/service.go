@@ -16,6 +16,7 @@ var ErrUnknownPlace = errors.New("unknown place")
 var ErrEmptyContent = errors.New("content is required")
 var ErrContentTooLong = errors.New("content exceeds maximum length")
 var ErrInvalidGeohash = errors.New("invalid geohash format")
+var ErrEmptyBeaconName = errors.New("beacon name is required")
 
 const MaxNoteContentLength = 1000
 const MinGeohashLength = 1
@@ -24,6 +25,7 @@ const DefaultCurrentUserPubkey = "npub1scout"
 const fallbackOperatorPubkey = "npub1operator"
 const fallbackRelayName = "Synchrono City Local"
 const fallbackRelayURL = "ws://localhost:8080"
+const cohortTag = "cohort"
 
 type Profile struct {
 	Pubkey      string `json:"pubkey"`
@@ -46,6 +48,7 @@ type Place struct {
 	Neighborhood    string   `json:"neighborhood"`
 	Description     string   `json:"description"`
 	ActivitySummary string   `json:"activity_summary"`
+	Picture         string   `json:"picture,omitempty"`
 	Tags            []string `json:"tags"`
 	Capacity        int      `json:"capacity"`
 	OccupantPubkeys []string `json:"occupant_pubkeys"`
@@ -67,6 +70,13 @@ type FeedSegment struct {
 	Description string `json:"description"`
 }
 
+type RelayListEntry struct {
+	Name   string `json:"name"`
+	URL    string `json:"url"`
+	Inbox  bool   `json:"inbox"`
+	Outbox bool   `json:"outbox"`
+}
+
 type CrossRelayFeedItem struct {
 	ID           string `json:"id"`
 	RelayName    string `json:"relay_name"`
@@ -86,6 +96,7 @@ type BootstrapResponse struct {
 	RelayOperatorPubkey string               `json:"relay_operator_pubkey"`
 	CurrentUserPubkey   string               `json:"current_user_pubkey"`
 	RelayURL            string               `json:"relay_url"`
+	RelayList           []RelayListEntry     `json:"relay_list"`
 	Places              []Place              `json:"places"`
 	Profiles            []Profile            `json:"profiles"`
 	Notes               []Note               `json:"notes"`
@@ -98,6 +109,11 @@ type CallIntent struct {
 	RoomID             string   `json:"room_id"`
 	PlaceTitle         string   `json:"place_title"`
 	ParticipantPubkeys []string `json:"participant_pubkeys"`
+}
+
+type CreateOrReturnBeaconResult struct {
+	Beacon  Place `json:"beacon"`
+	Created bool  `json:"created"`
 }
 
 type Service struct {
@@ -163,11 +179,17 @@ func (s *Service) Bootstrap() BootstrapResponse {
 		RelayOperatorPubkey: s.operatorPubkey,
 		CurrentUserPubkey:   s.currentUserPubkey,
 		RelayURL:            s.relayURL,
-		Places:              places,
-		Profiles:            slices.Clone(s.profiles),
-		Notes:               slices.Clone(s.notes),
-		FeedSegments:        slices.Clone(s.feedSegments),
-		CrossRelayItems:     slices.Clone(s.crossRelayItems),
+		RelayList: []RelayListEntry{{
+			Name:   s.relayName,
+			URL:    s.relayURL,
+			Inbox:  true,
+			Outbox: true,
+		}},
+		Places:          places,
+		Profiles:        slices.Clone(s.profiles),
+		Notes:           slices.Clone(s.notes),
+		FeedSegments:    slices.Clone(s.feedSegments),
+		CrossRelayItems: slices.Clone(s.crossRelayItems),
 	}
 }
 
@@ -175,17 +197,28 @@ func (s *Service) CreateNote(geohash, authorPubkey, content string) (Note, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	geohash = strings.TrimSpace(strings.ToLower(geohash))
 	if strings.TrimSpace(content) == "" {
 		return Note{}, ErrEmptyContent
 	}
 	if len(content) > MaxNoteContentLength {
 		return Note{}, ErrContentTooLong
 	}
-	if len(strings.TrimSpace(geohash)) < MinGeohashLength {
+	if len(geohash) < MinGeohashLength {
 		return Note{}, ErrInvalidGeohash
 	}
 	if !s.hasPlaceLocked(geohash) {
-		return Note{}, ErrUnknownPlace
+		s.places = append([]Place{{
+			Geohash:         geohash,
+			Title:           formatAdHocPlaceTitle(geohash),
+			Neighborhood:    "Ad hoc presence",
+			Description:     "No operator-defined place exists for this tile yet.",
+			ActivitySummary: "Presence was set directly from a map click.",
+			Tags:            []string{"ad-hoc", "geohash8"},
+			Capacity:        8,
+			OccupantPubkeys: []string{},
+			Unread:          false,
+		}}, s.places...)
 	}
 	if strings.TrimSpace(authorPubkey) == "" {
 		authorPubkey = s.currentUserPubkey
@@ -236,6 +269,68 @@ func (s *Service) ResolveCallIntent(geohash, pubkey string) (CallIntent, error) 
 	}, nil
 }
 
+func (s *Service) CreateOrReturnBeacon(geohash, name, picture, about string, tags []string) (CreateOrReturnBeaconResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	geohash = strings.TrimSpace(strings.ToLower(geohash))
+	if len(geohash) < MinGeohashLength {
+		return CreateOrReturnBeaconResult{}, ErrInvalidGeohash
+	}
+
+	if place, ok := s.placeByGeohashLocked(geohash); ok {
+		return CreateOrReturnBeaconResult{
+			Beacon:  place,
+			Created: false,
+		}, nil
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return CreateOrReturnBeaconResult{}, ErrEmptyBeaconName
+	}
+
+	picture = strings.TrimSpace(picture)
+	about = strings.TrimSpace(about)
+
+	beacon := Place{
+		Geohash:         geohash,
+		Title:           name,
+		Neighborhood:    "Newly lit beacon",
+		Description:     about,
+		ActivitySummary: "Freshly lit beacon.",
+		Picture:         picture,
+		Tags:            normalizeBeaconTags(tags),
+		Capacity:        8,
+		OccupantPubkeys: []string{},
+		Unread:          false,
+	}
+
+	s.places = append([]Place{beacon}, s.places...)
+
+	return CreateOrReturnBeaconResult{
+		Beacon:  beacon,
+		Created: true,
+	}, nil
+}
+
+func (s *Service) DefaultRoomGrants(roomID string) (bool, bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	geohash, ok := roomIDGeohash(roomID)
+	if !ok {
+		return false, false, false
+	}
+
+	place, ok := s.placeByGeohashLocked(geohash)
+	if !ok || !placeHasTag(place.Tags, cohortTag) {
+		return false, false, false
+	}
+
+	return false, true, true
+}
+
 func (s *Service) ValidateEditorialPin(geohash, noteID string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -253,8 +348,53 @@ func (s *Service) ValidateEditorialPin(geohash, noteID string) error {
 	return fmt.Errorf("note %s does not belong to %s", noteID, geohash)
 }
 
-func ResolveRoomID(operatorPubkey, geohash string) string {
-	return fmt.Sprintf("geo:%s:%s", operatorPubkey, geohash)
+func ResolveRoomID(_ string, geohash string) string {
+	return fmt.Sprintf("beacon:%s", geohash)
+}
+
+func normalizeBeaconTags(tags []string) []string {
+	baseTags := []string{"beacon", "geohash8"}
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(baseTags)+len(tags))
+
+	for _, tag := range append(baseTags, tags...) {
+		trimmed := strings.TrimSpace(strings.ToLower(tag))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+
+	return normalized
+}
+
+func roomIDGeohash(roomID string) (string, bool) {
+	trimmed := strings.TrimSpace(roomID)
+	geohash, ok := strings.CutPrefix(trimmed, "beacon:")
+	if !ok {
+		return "", false
+	}
+
+	geohash = strings.TrimSpace(strings.ToLower(geohash))
+	if len(geohash) < MinGeohashLength {
+		return "", false
+	}
+
+	return geohash, true
+}
+
+func placeHasTag(tags []string, wanted string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(strings.TrimSpace(tag), wanted) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func formatAdHocPlaceTitle(geohash string) string {

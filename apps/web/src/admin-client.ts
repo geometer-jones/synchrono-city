@@ -58,6 +58,8 @@ export type RoomPermission = {
   granted_by_pubkey: string;
   revoked: boolean;
   created_at?: string;
+  live_sync_applied?: boolean;
+  live_sync_warning?: string;
 };
 
 export type AuditEntry = {

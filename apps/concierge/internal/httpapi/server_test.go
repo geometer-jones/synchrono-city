@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -16,6 +18,7 @@ import (
 	livekitauth "github.com/livekit/protocol/auth"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/config"
+	scLiveKit "github.com/peterwei/synchrono-city/apps/concierge/internal/livekit"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/social"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
@@ -34,6 +37,34 @@ func TestHealthz(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if origin := rec.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Fatalf("expected CORS header, got %q", origin)
+	}
+}
+
+func TestCORSPreflightReturnsNoContent(t *testing.T) {
+	srv := NewServer(config.Config{}, store.NewMemory())
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/social/call-intent", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rec.Code)
+	}
+	if origin := rec.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Fatalf("expected wildcard origin, got %q", origin)
+	}
+	if methods := rec.Header().Get("Access-Control-Allow-Methods"); methods != "GET, POST, OPTIONS" {
+		t.Fatalf("expected allowed methods, got %q", methods)
+	}
+	if headers := rec.Header().Get("Access-Control-Allow-Headers"); headers != "Authorization, Content-Type" {
+		t.Fatalf("expected allowed headers, got %q", headers)
 	}
 }
 
@@ -121,6 +152,69 @@ func TestSocialBootstrapReturnsPhaseSixData(t *testing.T) {
 	}
 }
 
+func TestSocialBeaconCreateOrReturnExisting(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	createPayload := []byte(`{"geohash":"9q8yyk34","name":"Lantern Point","pic":"https://example.com/beacon.png","about":"Meet after sunset."}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/social/beacons", bytes.NewReader(createPayload))
+	createRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createRec.Code, createRec.Body.String())
+	}
+
+	var createdResponse struct {
+		Created bool `json:"created"`
+		Beacon  struct {
+			Geohash string `json:"geohash"`
+			Title   string `json:"title"`
+			Picture string `json:"picture"`
+		} `json:"beacon"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createdResponse); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if !createdResponse.Created {
+		t.Fatal("expected created response")
+	}
+	if createdResponse.Beacon.Geohash != "9q8yyk34" || createdResponse.Beacon.Title != "Lantern Point" {
+		t.Fatalf("unexpected beacon payload: %+v", createdResponse.Beacon)
+	}
+	if createdResponse.Beacon.Picture != "https://example.com/beacon.png" {
+		t.Fatalf("expected beacon picture, got %+v", createdResponse.Beacon)
+	}
+
+	duplicatePayload := []byte(`{"geohash":"9q8yyk34","name":"Duplicate","pic":"","about":"Ignored"}`)
+	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/v1/social/beacons", bytes.NewReader(duplicatePayload))
+	duplicateRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(duplicateRec, duplicateReq)
+
+	if duplicateRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for duplicate create, got %d body=%s", duplicateRec.Code, duplicateRec.Body.String())
+	}
+
+	var duplicateResponse struct {
+		Created bool `json:"created"`
+		Beacon  struct {
+			Title string `json:"title"`
+		} `json:"beacon"`
+	}
+	if err := json.Unmarshal(duplicateRec.Body.Bytes(), &duplicateResponse); err != nil {
+		t.Fatalf("decode duplicate response: %v", err)
+	}
+	if duplicateResponse.Created {
+		t.Fatal("expected duplicate response to reuse existing beacon")
+	}
+	if duplicateResponse.Beacon.Title != "Lantern Point" {
+		t.Fatalf("expected original beacon title, got %+v", duplicateResponse.Beacon)
+	}
+}
+
 func TestSocialNoteCreateAppendsNewNote(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
@@ -157,6 +251,49 @@ func TestSocialNoteCreateAppendsNewNote(t *testing.T) {
 	}
 }
 
+func TestSocialNoteCreateAllowsAdHocGeohash(t *testing.T) {
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "npub1operator",
+	}, store.NewMemory())
+
+	payload := []byte(`{"geohash":"9q8yyz","author_pubkey":"npub1scout","content":"Ad-hoc tile note."}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/social/notes", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	bootstrapReq := httptest.NewRequest(http.MethodGet, "/api/v1/social/bootstrap", nil)
+	bootstrapRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bootstrapRec, bootstrapReq)
+
+	var bootstrap struct {
+		Places []struct {
+			Geohash string `json:"geohash"`
+			Title   string `json:"title"`
+		} `json:"places"`
+		Notes []struct {
+			Geohash string `json:"geohash"`
+			Content string `json:"content"`
+		} `json:"notes"`
+	}
+	if err := json.Unmarshal(bootstrapRec.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("decode bootstrap: %v", err)
+	}
+	if len(bootstrap.Places) != 1 || bootstrap.Places[0].Geohash != "9q8yyz" {
+		t.Fatalf("expected ad-hoc place in bootstrap, got %+v", bootstrap.Places)
+	}
+	if bootstrap.Places[0].Title != "Field tile 9q8yyz" {
+		t.Fatalf("expected ad-hoc place title, got %+v", bootstrap.Places[0])
+	}
+	if len(bootstrap.Notes) != 1 || bootstrap.Notes[0].Geohash != "9q8yyz" {
+		t.Fatalf("expected ad-hoc note in bootstrap, got %+v", bootstrap.Notes)
+	}
+}
+
 func TestSocialCallIntentResolvesRoomID(t *testing.T) {
 	srv := NewServer(config.Config{
 		PrimaryOperatorPub: "npub1operator",
@@ -184,7 +321,7 @@ func TestSocialCallIntentResolvesRoomID(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.RoomID != "geo:npub1operator:9q8yyk" {
+	if response.RoomID != "beacon:9q8yyk" {
 		t.Fatalf("expected room id, got %s", response.RoomID)
 	}
 	if len(response.ParticipantPubkeys) == 0 || response.ParticipantPubkeys[0] != "npub1scout" {
@@ -215,7 +352,7 @@ func TestSocialCallIntentCreatesAdHocRoomID(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.RoomID != "geo:npub1operator:9q8yyz" {
+	if response.RoomID != "beacon:9q8yyz" {
 		t.Fatalf("expected room id, got %s", response.RoomID)
 	}
 	if response.PlaceTitle != "Field tile 9q8yyz" {
@@ -438,7 +575,7 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 
 	roomPermissionPayload := []byte(`{
 	  "subject_pubkey":"` + mustPublicKey(t, guestSecretKey(t)) + `",
-	  "room_id":"geo:npub1operator:9q8yyk",
+	  "room_id":"beacon:9q8yyk",
 	  "can_join":true,
 	  "can_publish":false,
 	  "can_subscribe":true
@@ -453,7 +590,7 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 		t.Fatalf("expected room permission create 201, got %d", roomRec.Code)
 	}
 
-	tokenPayload := []byte(`{"room_id":"geo:npub1operator:9q8yyk"}`)
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
 	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
 	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
 	tokenRec := httptest.NewRecorder()
@@ -484,7 +621,7 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 	if response.Token.Identity != mustPublicKey(t, guestSecretKey(t)) {
 		t.Fatalf("expected identity %s, got %s", mustPublicKey(t, guestSecretKey(t)), response.Token.Identity)
 	}
-	if response.Token.RoomID != "geo:npub1operator:9q8yyk" {
+	if response.Token.RoomID != "beacon:9q8yyk" {
 		t.Fatalf("expected room id, got %s", response.Token.RoomID)
 	}
 	if response.Token.LiveKitURL != "ws://livekit.example.test" {
@@ -508,7 +645,7 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify livekit token: %v", err)
 	}
-	if grants.Video == nil || grants.Video.Room != "geo:npub1operator:9q8yyk" || !grants.Video.RoomJoin {
+	if grants.Video == nil || grants.Video.Room != "beacon:9q8yyk" || !grants.Video.RoomJoin {
 		t.Fatalf("unexpected video grants: %+v", grants.Video)
 	}
 	if grants.Video.CanPublish == nil || *grants.Video.CanPublish {
@@ -516,6 +653,57 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 	}
 	if grants.Video.CanSubscribe == nil || !*grants.Video.CanSubscribe {
 		t.Fatalf("expected canSubscribe true, got %+v", grants.Video.CanSubscribe)
+	}
+}
+
+func TestTokenAllowsDefaultListenerJoinForCohortBeacon(t *testing.T) {
+	policyStore := store.NewMemory()
+	srv := NewServer(config.Config{
+		LiveKitAPIKey:      "devkey",
+		LiveKitAPISecret:   "devsecret",
+		LiveKitURL:         "ws://livekit.example.test",
+		PrimaryOperatorPub: mustPublicKey(t, operatorSecretKey(t)),
+	}, policyStore)
+	seedSocialScene(t, srv,
+		[]social.Place{{
+			Geohash: "9q8yyk",
+			Title:   "Zero to Hero Cohort",
+			Tags:    []string{"beacon", "cohort", "curriculum:zero-to-hero"},
+		}},
+		nil,
+		nil,
+		nil,
+	)
+
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
+	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
+	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
+	tokenRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("expected token request 200, got %d body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var response struct {
+		Reason string `json:"reason"`
+		Token  struct {
+			Grants struct {
+				CanPublish   bool `json:"can_publish"`
+				CanSubscribe bool `json:"can_subscribe"`
+			} `json:"grants"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Reason != "room_default_listener" {
+		t.Fatalf("expected room_default_listener reason, got %s", response.Reason)
+	}
+	if response.Token.Grants.CanPublish || !response.Token.Grants.CanSubscribe {
+		t.Fatalf("unexpected grants: %+v", response.Token.Grants)
 	}
 }
 
@@ -528,7 +716,7 @@ func TestOperatorTokenGetsFullRoomGrants(t *testing.T) {
 		PrimaryOperatorPub: operatorPubkey,
 	}, store.NewMemory())
 
-	tokenPayload := []byte(`{"room_id":"geo:` + operatorPubkey + `:9q8yyk"}`)
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
 	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
 	withNIP98Auth(t, tokenReq, operatorSecretKey(t), tokenPayload)
 	tokenRec := httptest.NewRecorder()
@@ -561,6 +749,94 @@ func TestOperatorTokenGetsFullRoomGrants(t *testing.T) {
 	}
 	if grants.Video.CanSubscribe == nil || !*grants.Video.CanSubscribe {
 		t.Fatalf("expected operator subscribe grant, got %+v", grants.Video)
+	}
+}
+
+func TestAdminRoomPermissionUpdatesLiveParticipantWhenConnected(t *testing.T) {
+	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
+	guestPubkey := mustPublicKey(t, guestSecretKey(t))
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: operatorPubkey,
+	}, store.NewMemory())
+	updater := &fakeParticipantPermissionUpdater{}
+	srv.participantPermissionUpdater = updater
+
+	payload := []byte(`{
+	  "subject_pubkey":"` + guestPubkey + `",
+	  "room_id":"beacon:9q8yyk",
+	  "can_join":true,
+	  "can_publish":true,
+	  "can_subscribe":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/admin/room-permissions", bytes.NewReader(payload))
+	withNIP98Auth(t, req, operatorSecretKey(t), payload)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(updater.calls) != 1 {
+		t.Fatalf("expected one updater call, got %d", len(updater.calls))
+	}
+	if updater.calls[0].roomID != "beacon:9q8yyk" || updater.calls[0].identity != guestPubkey {
+		t.Fatalf("unexpected updater call: %+v", updater.calls[0])
+	}
+	if !updater.calls[0].permission.CanPublish || !updater.calls[0].permission.CanSubscribe {
+		t.Fatalf("unexpected updater permission: %+v", updater.calls[0].permission)
+	}
+
+	var response struct {
+		LiveSyncApplied bool `json:"live_sync_applied"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.LiveSyncApplied {
+		t.Fatal("expected live sync applied flag")
+	}
+}
+
+func TestAdminRoomPermissionReturnsLiveSyncWarningOnFailure(t *testing.T) {
+	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
+	guestPubkey := mustPublicKey(t, guestSecretKey(t))
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: operatorPubkey,
+	}, store.NewMemory())
+	srv.participantPermissionUpdater = &fakeParticipantPermissionUpdater{
+		err: errors.New("livekit room service unavailable"),
+	}
+
+	payload := []byte(`{
+	  "subject_pubkey":"` + guestPubkey + `",
+	  "room_id":"beacon:9q8yyk",
+	  "can_join":true,
+	  "can_publish":false,
+	  "can_subscribe":true
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/admin/room-permissions", bytes.NewReader(payload))
+	withNIP98Auth(t, req, operatorSecretKey(t), payload)
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		LiveSyncApplied bool   `json:"live_sync_applied"`
+		LiveSyncWarning string `json:"live_sync_warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.LiveSyncApplied {
+		t.Fatal("expected live sync applied to be false on updater failure")
+	}
+	if response.LiveSyncWarning == "" {
+		t.Fatal("expected live sync warning on updater failure")
 	}
 }
 
@@ -885,6 +1161,31 @@ func withNIP98Auth(t *testing.T, req *http.Request, secretKey string, body []byt
 	if body != nil {
 		req.Body = ioNopCloser(body)
 	}
+}
+
+type fakeParticipantPermissionUpdater struct {
+	err   error
+	calls []participantPermissionUpdateCall
+}
+
+type participantPermissionUpdateCall struct {
+	roomID     string
+	identity   string
+	permission scLiveKit.ParticipantPermission
+}
+
+func (f *fakeParticipantPermissionUpdater) UpdateParticipantPermission(
+	_ context.Context,
+	roomID,
+	identity string,
+	permission scLiveKit.ParticipantPermission,
+) error {
+	f.calls = append(f.calls, participantPermissionUpdateCall{
+		roomID:     roomID,
+		identity:   identity,
+		permission: permission,
+	})
+	return f.err
 }
 
 func signedNIP98Event(t *testing.T, secretKey string, req *http.Request, body []byte, createdAt time.Time) nostr.Event {

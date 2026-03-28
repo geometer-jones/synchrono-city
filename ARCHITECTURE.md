@@ -49,54 +49,65 @@ The splash page is the entry point for new visitors, presenting the project's mi
 - Secondary CTA is outlined, opens GitHub in new tab
 - Mobile: CTAs stack vertically
 
-### 1.2 World: Geospatial Mesh
+### 1.2 World: Beacon Mesh
 
-The first-version client renders geospatial activity from geohash-scoped LiveKit calls plus geohash-tagged kind `1` notes.
+The first-version client renders geospatial activity from beacon-scoped public conversation and beacon-scoped LiveKit calls.
 
-#### Geohash-Scoped Call State
+#### Beacon-Scoped Public State
 
-The client should treat active LiveKit participation as the authoritative rendered live place surface.
+The client should treat a beacon as the canonical public social object for a place.
 
-- A user can step onto the map to remain in the geohash-scoped live call, or step off the map and remain reachable through DMs instead
-- Joining a place means requesting a LiveKit token for the canonical room bound to that geohash on the current relay surface
-- If two users join the same canonical geohash, they should be connected to the same LiveKit call automatically
-- A single participant in a geohash-scoped call should still be rendered as available
-- The canonical public precision remains `geohash6` unless a relay exposes a different local policy
-- Clients should treat the longest valid public `g` tag as the canonical tile for note aggregation and room association
+- A beacon is a NIP-29 group called a beacon
+- The beacon group id is the bare canonical `geohash8`
+- Each beacon carries geohash tags for prefix lengths `1` through `8`
+- A beacon is permanently bound to its `geohash8` and does not move after creation
+- Public beacon posts remain kind `1` events, but `h=<geohash8>` is the beacon scope everywhere
+- Beacon-scoped kind `1` events belong to `World` rather than `Pulse`
 - Exact coordinates remain operator-gated and should not be required for baseline map rendering
+
+#### Beacon-Scoped Call State
+
+The client should treat active LiveKit participation inside a beacon as the authoritative rendered live place surface.
+
+- Joining a place means entering the beacon context for that `geohash8`
+- Joining media means requesting a LiveKit token for room `beacon:<geohash8>`
+- If two users join the same beacon room, they should connect to the same LiveKit call automatically
+- A single participant in a beacon-scoped call should still be rendered as available
+- Beacon owners and admins govern beacon-local moderation, but relay policy and relay auth still override beacon-local decisions
 
 #### Marker and Card Model
 
-The map surface aggregates by canonical geohash tile.
+The map surface aggregates by beacon, with one beacon per canonical geohash tile.
 
 - The World map should remain pannable and zoomable while preserving place overlays and the global call surface
-- Clicking the map background should relocate the user's presence to the nearest `geohash6` for that click and join the room for that geohash
-- That background-click join path should use the default relay's LiveKit room/token flow when available
-- A circle marker represents the tile's combined note and call activity
-- The numeral written inside the marker is only the count of kind `1` events in that tile
-- If the tile has an active call and zero kind `1` notes, the marker should display `0`
-- Each tile may expose a place card whose top-left corner is anchored at the center of the circle marker
-- The top of the card shows the text content of the latest kind `1` note for that exact geohash, when one exists
-- The card lists the current call participants for that tile beneath the latest-note preview
-- Each participant in the roster shows their media state indicators:
-  - **Mic:** on/off (muted)
-  - **Cam:** on/off
-  - **Screenshare:** active/inactive
-  - **Deafen:** on/off (user cannot hear others)
+- Clicking empty map background should resolve the nearest `geohash8`, drop a temporary pin, and open a bottom overlay
+- The initial overlay offers exactly `Light Beacon` and `Cancel`
+- `Light Beacon` opens a creation form with `name`, `pic`, and `about`
+- Beacon creation must be idempotent by `geohash8`; if another client wins the race, the loser should open the existing beacon rather than surface a duplicate-creation failure
+- If a beacon already exists for the selected `geohash8`, the client should open that existing beacon instead of showing creation controls
+- A beacon marker should render the beacon avatar as the primary visual identity
+- If no avatar exists, the marker should fall back to a stable placeholder derived from beacon metadata
+- Marker styling may communicate live-call presence, but the marker itself should not display post counts or participant counts
+- Each marker exposes a card whose top-left corner is anchored at the center of the avatar marker
+- The card sits behind the avatar using z-index so the avatar remains the foreground anchor
+- The card shows the beacon name, beacon about text, total beacon post count, and live participant count
+- The card also shows the latest beacon activity preview and, when active, the current participant roster with media state indicators
 - Profile inspection from the card should route through `Pulse` user profile views
-- If the tile has neither notes nor an active call, the client should render nothing
+- If a tile has no beacon, the client should render nothing for that tile
 
 **Recommended client behavior:**
-1. Resolve the canonical geohash tile
-2. Count kind `1` events tagged to that tile
-3. Resolve the active LiveKit room for that tile
-4. Resolve the latest kind `1` note for that exact geohash
-5. Render one circle marker per tile with the note count
-6. Render the place card with latest-note preview and, when present, the participant roster with media state indicators
+1. Resolve the canonical `geohash8`
+2. Resolve whether a beacon exists for that id
+3. If none exists and the user clicked empty map, drop a temporary pin and open the bottom overlay
+4. If the user submits beacon creation, perform create-or-return-existing atomically
+5. Resolve beacon-scoped kind `1` events by `h=<geohash8>`
+6. Resolve the active LiveKit room `beacon:<geohash8>`
+7. Render one avatar marker per beacon
+8. Render the attached card with beacon metadata, counters, latest activity preview, and participant roster
 
 #### Global Call Overlay
 
-When a user joins a geohash-scoped call, a global call overlay provides persistent call controls regardless of navigation within the app.
+When a user joins a beacon-scoped call, a global call overlay provides persistent call controls regardless of navigation within the app.
 
 **Overlay behavior:**
 - The overlay is visible whenever the user has an active LiveKit connection
@@ -118,30 +129,26 @@ When a user joins a geohash-scoped call, a global call overlay provides persiste
 - Does not obstruct map interaction when in World view
 - Minimizable to a compact bar showing only active indicators
 
-#### Dense-Area Clustering
+#### Marker Rendering
 
-Dense map regions may cluster adjacent geohash tiles for readability.
+The map renders one marker per visible beacon.
 
-- Cluster markers should sum note counts across the included tiles
-- Clustering should respond to zoom level and should dissolve into per-tile markers as the user zooms in
-- Clicking a cluster should zoom in but should not relocate user presence
-- Cluster expansion should preserve underlying per-tile call state
-- The cluster card should surface merged call state with clear dividers between each underlying tile call
-- Each divided section should show the tile's latest note preview and its participant roster when active
+- Tiles without beacons do not render markers
+- Marker identity is the beacon avatar rather than a numeric badge
+- Active calls remain visually distinct without changing the beacon marker's identity
+- Marker detail surfaces continue to show the selected beacon's metadata, counters, activity preview, and participant roster when active
 
 #### World and Chats
 
-Relay operators may organize local public conversation around places, venues, neighborhoods, or temporary events without relying on relay-enforced group semantics.
+Relay operators may organize local public conversation around places, venues, neighborhoods, or temporary events through beacon groups while preserving relay-local policy authority.
 
-- Public chat remains standard Nostr event flow on the relay
-- Moderation policy is enforced by operator controls and Concierge-owned local policy
-- Clients may present place-based public rooms in the UI, but those rooms are an application concept rather than a separate relay protocol
-- Clicking the map background should relocate the user's presence to the nearest `geohash6` to that click and join the room for that tile
-- Tapping a marker should set the user's active place presence to that exact geohash and join the geohash-scoped call for that tile
-- Joining from marker selection should happen immediately without a secondary confirmation step
-- Clicking a cluster should zoom the map toward the underlying tiles without relocating presence
-- After presence is set, the client may reveal tile detail in place and provide a path into `Chats` scoped to the exact geohash as a stack of kind `1` notes
-- Selecting a note from that chat stack should open the note in `Pulse`
+- Public beacon chat remains standard kind `1` Nostr event flow on the relay, scoped by beacon `h` tags
+- Moderation policy is enforced first by relay policy; beacon owners and admins moderate within that higher-level boundary
+- Clients may present beacon-based public rooms in the UI, and those beacons are the public conversation object for World
+- Clicking the map background should either open the existing beacon for that `geohash8` or offer beacon creation through the bottom overlay
+- Tapping a marker should set the user's active place presence to that exact beacon and open beacon detail without joining media automatically
+- Joining media happens from the selected beacon context and targets room `beacon:<geohash8>`
+- After presence is set, the client should reveal beacon detail directly in `World` as beacon-scoped conversation, not as Pulse note drill-down
 
 #### Route Interoperability
 
@@ -149,118 +156,89 @@ Relay operators may organize local public conversation around places, venues, ne
                     CLIENT ROUTE INTEROP
                     ====================
 
-  WORLD                         CHATS                        PULSE
-    │                             │                            │
-    │  ┌─────────────────────┐    │                            │
-    │  │  Geohash Marker     │    │                            │
-    │  │  ┌───────────────┐  │    │                            │
-    │  │  │  Circle + #   │  │    │                            │
-    │  │  │  ┌─────────┐  │  │    │                            │
-    │  │  │  │Card     │  │──┼───▶│ Geo-chat (kind 1 stack)    │
-    │  │  │  │- latest │  │  │    │  ordered by recency        │
-    │  │  │  │  note   │  │  │    │                            │
-    │  │  │  │- roster │  │  │    │  ┌─────────────────────┐   │
-    │  │  │  │- join   │  │  │    │  │ Note from geo-chat  │───┼──▶ Note detail
-    │  │  │  └─────────┘  │  │    │  └─────────────────────┘   │  context
-    │  │  └───────────────┘  │    │                            │
-    │  └─────────────────────┘    │                            │
-    │                             │                            │
-    │                             │  ┌─────────────────────┐   │
-    │                             │  │ DM Thread           │   │
-    │                             │  │ - kind 4/14 msgs    │   │
-    │                             │  │ - [call] button     │───┼──▶ DM note view
-    │                             │  │ - [view profile]    │   │    (if public)
-    │                             │  └─────────────────────┘   │
-    │                             │                            │
-    │                             │  ┌─────────────────────┐   │
-    │                             │  │ Group DM Thread     │   │
-    │                             │  │ - sealed DMs        │   │
-    │                             │  │ - [call] button     │   │
-    │                             │  │ - member list       │   │
-    │                             │  └─────────────────────┘   │
-    │                             │                            │
+  WORLD (map-owned, full-screen below app bar)
+    │
+    │  ┌─────────────────────────────────────────────────────┐
+    │  │  MAP SURFACE                                        │
+    │  │                                                     │
+    │  │   ┌─────────┐     ┌─────────┐                      │
+    │  │   │ Avatar  │     │ Avatar  │  ...                 │
+    │  │   │ Beacon  │     │ Beacon  │                      │
+    │  │   │ marker  │     │ marker  │                      │
+    │  │   └────┬────┘     └─────────┘                      │
+    │  │        │                                            │
+    │  │        │ tap (open beacon)                          │
+    │  │        ▼                                            │
+    │  │  ┌─────────────────────────────────────────────┐   │
+    │  │  │ BEACON CARD (behind avatar)                 │   │
+    │  │  │ - beacon name / about                       │   │
+    │  │  │ - post + live counters                      │   │
+    │  │  │ - latest beacon activity                    │   │
+    │  │  │ - participant roster with media state       │   │
+    │  │  │ - [click author] ───────────────────────────┼───┼──▶ PULSE
+    │  │  └─────────────────────────────────────────────┘   │   (profile view)
+    │  │                                                     │
+    │  │  ┌─────────────────────────────────────────────┐   │
+    │  │  │ BOTTOM OVERLAY / BEACON SHEET               │   │
+    │  │  │ - Light Beacon / Cancel                     │   │
+    │  │  │ - name / pic / about                        │   │
+    │  │  │ - beacon posts stay in World                │   │
+    │  │  └─────────────────────────────────────────────┘   │
+    │  │                                                     │
+    │  └─────────────────────────────────────────────────────┘
+    │
+    │  BACKGROUND MAP CLICK → geohash8 computed → pin + bottom overlay
+
+  CHATS (private threads only)              PULSE (public context)
+    │                                          │
+    │  ┌─────────────────────┐                │  ┌─────────────────────┐
+    │  │ DM Thread           │                │  │ Profile view        │
+    │  │ - kind 4/14 msgs    │                │  │ - metadata          │
+    │  │ - [call] button     │                │  │ - authored notes    │
+    │  │ - [view profile] ───┼────────────────┼──▶ - place context    │
+    │  └─────────────────────┘                │  └─────────────────────┘
+    │                                          │
+    │  ┌─────────────────────┐                │  ┌─────────────────────┐
+    │  │ Group DM Thread     │                │  │ Note detail view    │
+    │  │ - sealed DMs        │                │  │ - full content      │
+    │  │ - [call] button     │                │  │ - replies thread    │
+    │  │ - member list       │                │  │ - author context    │
+    │  └─────────────────────┘                │  └─────────────────────┘
+    │                                          │
 ```
 
 **Navigation rules:**
-- Tapping a geo-chat note opens the note in Pulse for full context and threaded replies
-- Tapping a DM message opens the sender's profile in Pulse (if public profile exists)
-- Group DMs are private — no Pulse integration for private messages
-- All thread types support calling via the global call overlay
+- **World → Pulse:** Clicking an author name in the beacon card opens their profile in Pulse
+- **World → World:** Beacon-scoped posts stay in World and do not route to Pulse
+- **World map interaction:** Background click computes geohash8 and opens the pin/create flow; marker tap opens beacon detail
+- **Chats → Pulse:** Clicking a DM participant opens their profile in Pulse (if public profile exists)
+- **Group DMs:** Private — no Pulse integration for group messages
+- **All routes:** Global call overlay persists across navigation
 
 ### 1.3 Chats: Thread Listing
 
-The `Chats` view aggregates all conversation threads accessible to the user.
+The `Chats` view aggregates the private conversation threads accessible to the user.
 
 **Thread types:**
 
 | Type | Identifier | LiveKit | Persistence |
 |------|------------|---------|-------------|
-| Geo-chat | Geohash (e.g., `9q8yyk`) | Yes (public room) | While at place, or after contributing a note |
 | DM | Participant pubkey(s) | Yes (private room) | Until explicitly deleted |
 | Group DM | Set of pubkeys | Yes (private room) | Until explicitly deleted |
 
 **Thread listing order:**
 - Threads with unread messages appear first
 - Then sorted by most recent activity
-- Geo-chats where user is currently present are highlighted
+- Active DM/group DM calls should be visible in the thread inventory
 
-**Geo-chat persistence rules:**
-- A geo-chat appears in the thread listing while the user is present at that geohash (in the call or viewing the place)
-- When the user leaves the geohash (moves presence away), the geo-chat is removed from the listing **unless** the user has contributed a kind `1` note to that geo-thread
-- Contributed notes create a durable relationship with the place
-- User may manually pin a geo-chat to persist regardless of contribution
-
-**Geo-chat persistence state machine:**
-
-```
-                    GEO-CHAT THREAD PERSISTENCE
-                    ===========================
-
-                              ┌─────────────────────┐
-                              │                     │
-                              ▼                     │
-                        ┌───────────┐               │
-                        │  NOT_IN_  │               │
-                        │  LISTING  │               │
-                        └───────────┘               │
-                              │                     │
-                   user joins│place (call/view)     │
-                              ▼                     │
-                        ┌───────────┐               │
-              ┌────────▶│  IN_      │◀────────┐     │
-              │         │  LISTING  │         │     │
-              │         └───────────┘         │     │
-              │              │                │     │
-              │   user leaves│place           │     │
-              │              ▼                │     │
-              │         ┌───────────┐         │     │
-              │         │  HAS_     │         │     │
-              │         │  CONTRIBUTED?       │     │
-              │         └───────────┘         │     │
-              │           │     │             │     │
-              │      yes  │     │ no          │     │
-              │           ▼     ▼             │     │
-              │     ┌────────┐ ┌────────┐     │     │
-              │     │ PINNED │ │ REMOVE │─────┼─────┘
-              │     │ (stay) │ │ (gone) │     │
-              │     └────────┘ └────────┘     │
-              │           │                   │
-              │   user rejoins│place          │
-              └───────────────┘               │
-                                              │
-          User may manually pin at any time ──┘
-          to persist regardless of contribution
-```
-
-**Pinned notes in geo-chat:**
-- Relay operators may pin one or more kind `1` notes to the top of a geo-chat
-- Pinned notes appear above the chronological stack with a pin indicator
-- Only operators and moderators can pin/unpin
-- Pinning is local relay policy, not a Nostr event kind
+**Boundary rules:**
+- `Chats` does not list beacon chats or public place threads
+- Public place conversation remains in `World` as beacon-scoped conversation; `Pulse` only exposes related profiles and non-beacon public events
+- If no private threads are available, `Chats` should present an empty inbox state and a path back to `World`
 
 ### 1.4 Private Calling (DMs and Group DMs)
 
-DMs and group DMs support LiveKit calling with distinct permission semantics from public geo-chats.
+DMs and group DMs support LiveKit calling with distinct permission semantics from public beacon chats.
 
 **Room resolution:**
 
@@ -291,9 +269,25 @@ DMs and group DMs support LiveKit calling with distinct permission semantics fro
 3. Members may join/leave freely while call is active
 4. Call ends when last participant leaves
 
-### 1.5 Settings: Relay Admin
+### 1.5 Settings: Keys, Relays, and Relay Admin
 
 A compliant relay should expose operator controls through its web client or another authenticated admin surface.
+
+**Settings information architecture:**
+- `Keys`: local client identity, key generation, key import, signer status
+- `Relays`: relay identity, health, operator pubkey, scene metrics
+- `Admin`: privileged moderation and governance workflows
+
+The three sections should open independently. `Admin` should auto-open when the current session or connected signer resolves to the relay operator pubkey.
+
+**Key-management requirements:**
+- The client should allow generating fresh local Nostr keypairs in-browser
+- The client should allow importing existing private keys as `nsec` or 64-character hex
+- Generated/imported keys should be persisted locally in a browser keyring until explicitly removed
+- The app should be able to hold multiple local keypairs at once
+- One stored local keypair is designated as active at any given time
+- The active local key becomes the client identity for local note authorship and place-presence flows
+- Browser-extension signing may still remain the boundary for privileged NIP-98 admin requests
 
 **Recommended owner actions:**
 - Review reports, notes, room activity, and call activity from the web client
@@ -303,8 +297,10 @@ A compliant relay should expose operator controls through its web client or anot
 - Manage local owners and moderators
 
 **Recommended client UX:**
-- Expose as `Settings -> Relay Admin`
+- Expose as `Settings -> Keys | Relays | Admin`
 - Do not ship a separate `District Admin` or district-config surface in the first-version client
+- Allow key generation and private-key import directly inside `Settings -> Keys`
+- Allow operators to review multiple stored local keypairs and switch the active key
 - Allow an operator to paste or resolve a pubkey or `npub`
 - Allow role assignment such as `moderator` or `owner`
 - Allow room-level permission assignment
@@ -319,8 +315,8 @@ A compliant relay should expose operator controls through its web client or anot
 - `Local` feed: public events carried by the current relay
 - `For You` feed: Concierge-produced merge across the user's configured relays and followed authors
 - Profile lookup, author context, and follow actions live inside `Pulse` rather than a separate `People` surface
-- `Pulse` acts as the algorithmic feed view over the same world-state that `World` renders spatially
-- Note drill-down from `World -> Chats` should continue into `Pulse` for full note context and surrounding tagged conversation
+- `Pulse` acts as the relay-feed and profile surface adjacent to `World`, not as the home for beacon-thread conversation
+- Beacon-scoped posts identified by beacon `h` tags do not drill down into `Pulse`; they stay in `World`
 - Ranking may combine freshness, follow graph, local standing, and geospatial relevance
 - Any editorial pinning or sponsorship is local operator behavior, not a standardized custom Nostr kind in `v1.0-alpha`
 
@@ -337,8 +333,8 @@ A compliant relay should expose operator controls through its web client or anot
 │  │                         CLIENT LAYER                               │   │
 │  │  ┌─────────────────────────────────────────────────────────────┐   │   │
 │  │  │  Browser App (React + Vite)                                │   │   │
-│  │  │  - World: map-native calls, places, note markers           │   │   │
-│  │  │  - Chats: geo-chat, private threads                        │   │   │
+│  │  │  - World: map-native beacons, calls, avatar markers        │   │   │
+│  │  │  - Chats: DMs and group DMs                                │   │   │
 │  │  │  - Pulse: relay feed, profiles, follows                    │   │   │
 │  │  │  - Settings: keys, relays, relay admin                     │   │   │
 │  │  └─────────────────────────────────────────────────────────────┘   │   │
@@ -353,7 +349,7 @@ A compliant relay should expose operator controls through its web client or anot
 │  │  │                    STRFRY RELAY                              │  │   │
 │  │  │  - Nostr event transport and storage                         │  │   │
 │  │  │  - Policy shim -> Concierge for publish authorization        │  │   │
-│  │  │  - Geohash-tagged events for geo queries                     │  │   │
+│  │  │  - Beacon-scoped events and geohash-tagged metadata          │  │   │
 │  │  └───────────────────────────────────────────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                        │
@@ -433,27 +429,26 @@ A compliant relay should expose operator controls through its web client or anot
        │                        │─────────────────────────▶│
 ```
 
-### 3.2 Geohash Call Resolution Flow
+### 3.2 Beacon Resolution Flow
 
 ```
-                  GEOHASH CALL RESOLUTION
-                  =======================
+                  BEACON RESOLUTION
+                  =================
 
   CLIENT                      RELAY / CONCIERGE / LIVEKIT
      │                                   │
-     │  1. Query kind 1 notes by #g      │
+     │  1. Resolve beacon by geohash8    │
      │──────────────────────────────────▶│
      │                                   │
-     │  2. Resolve active room + roster  │
+     │  2. Return beacon or none         │
      │◀──────────────────────────────────│
      │                                   │
-     │  3. Canonicalize geohash tile     │
-     │  4. Count kind 1 events           │
-     │  5. Map tile -> one room          │
-     │  6. Render circle marker          │
-     │     with note count               │
-     │  7. Attach place card with        │
-     │     note preview and roster       │
+     │  3. If none: pin + create sheet   │
+     │  4. Query kind 1 events by #h     │
+     │  5. Resolve room beacon:<hash>    │
+     │  6. Render avatar marker          │
+     │  7. Attach beacon card with       │
+     │     metadata, counters, roster    │
      │                                   │
 ```
 
@@ -505,28 +500,28 @@ The client uses two transport protocols:
 
 Every data flow has shadow paths for nil input, empty input, and upstream errors.
 
-**Geohash Call Resolution - Shadow Paths:**
+**Beacon Resolution - Shadow Paths:**
 
 ```
-                    GEOHASH RESOLUTION SHADOW PATHS
-                    ===============================
+                    BEACON RESOLUTION SHADOW PATHS
+                    ==============================
 
   INPUT                    PROCESSING                    OUTPUT
     │                          │                           │
-    ├──[nil geohash]──────────▶│ Skip call resolution     ▶│ No marker
+    ├──[nil geohash]──────────▶│ Skip beacon resolution   ▶│ No marker
     │                          │                           │
-    ├──[empty geohash]────────▶│ Skip call resolution     ▶│ No marker
+    ├──[empty geohash]────────▶│ Skip beacon resolution   ▶│ No marker
     │                          │                           │
     ├──[invalid geohash]──────▶│ Log warning, skip        ▶│ No marker
     │                          │                           │
-    ├──[LiveKit down]─────────▶│ Return empty roster      ▶│ Marker with count
-    │                          │  (notes still shown)      │  no participants
+    ├──[LiveKit down]─────────▶│ Return empty roster      ▶│ Avatar marker +
+    │                          │  (beacon still shown)     │  no participants
     │                          │                           │
     ├──[Relay timeout]────────▶│ Circuit breaker opens    ▶│ Cached data or
     │                          │                           │  empty result
     │                          │                           │
-    └──[happy path]───────────▶│ Full resolution          ▶│ Marker + card
-                               │                           │
+    └──[happy path]───────────▶│ Full resolution          ▶│ Avatar marker +
+                               │                           │  beacon card
 ```
 
 **LiveKit Token Vending - Shadow Paths:**

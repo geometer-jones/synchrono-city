@@ -27,6 +27,7 @@ describe("normalizeBootstrapPayload", () => {
     });
 
     expect(payload.feed_segments).toEqual([]);
+    expect(payload.relay_list).toEqual([]);
     expect(payload.cross_relay_items).toEqual([]);
     expect(payload.profiles).toEqual([]);
     expect(payload.notes).toEqual([]);
@@ -37,6 +38,14 @@ describe("normalizeBootstrapPayload", () => {
   it("accepts concierge snake_case fields", () => {
     const payload = normalizeBootstrapPayload({
       current_user_pubkey: "npub1real",
+      relay_list: [
+        {
+          name: "Mission Mesh",
+          relay_url: "wss://mission.example",
+          inbox: true,
+          outbox: false
+        } as unknown as never
+      ],
       places: [
         {
           geohash: "9q8yyk",
@@ -95,6 +104,12 @@ describe("normalizeBootstrapPayload", () => {
     });
 
     expect(payload.current_user_pubkey).toBe("npub1real");
+    expect(payload.relay_list[0]).toMatchObject({
+      name: "Mission Mesh",
+      url: "wss://mission.example",
+      inbox: true,
+      outbox: false
+    });
     expect(payload.places[0]).toMatchObject({
       activitySummary: "Busy",
       occupantPubkeys: ["npub1aurora"],
@@ -197,6 +212,18 @@ describe("normalizeBootstrapPayload filtering", () => {
     expect(payload.cross_relay_items[0]?.relayName).toBe("Valid");
   });
 
+  it("filters relay-list entries with empty urls", () => {
+    const payload = normalizeBootstrapPayload({
+      relay_list: [
+        { name: "Valid", relay_url: "wss://valid.example", inbox: true, outbox: true } as unknown as never,
+        { name: "Invalid", relay_url: "", inbox: true, outbox: false } as unknown as never
+      ]
+    });
+
+    expect(payload.relay_list).toHaveLength(1);
+    expect(payload.relay_list[0]?.name).toBe("Valid");
+  });
+
   it("returns empty arrays when payload is completely empty", () => {
     const payload = normalizeBootstrapPayload({});
 
@@ -204,6 +231,7 @@ describe("normalizeBootstrapPayload filtering", () => {
     expect(payload.profiles).toEqual([]);
     expect(payload.notes).toEqual([]);
     expect(payload.feed_segments).toEqual([]);
+    expect(payload.relay_list).toEqual([]);
     expect(payload.cross_relay_items).toEqual([]);
     expect(payload.relay_name).toBeUndefined();
     expect(payload.relay_operator_pubkey).toBeUndefined();

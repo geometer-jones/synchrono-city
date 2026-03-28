@@ -9,13 +9,31 @@ export type LiveKitParticipantState = {
   isLocal: boolean;
 };
 
+export type LiveKitMediaStreamState = {
+  id: string;
+  participantIdentity: string;
+  source: "camera" | "screen_share";
+  isLocal: boolean;
+  track: {
+    attach: (element: HTMLMediaElement) => HTMLMediaElement;
+    detach: (element: HTMLMediaElement) => HTMLMediaElement;
+  };
+};
+
+export type LiveKitPermissionState = {
+  canPublish: boolean;
+  canSubscribe: boolean;
+};
+
 type ConnectionStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
 type ConnectLiveKitOptions = {
   url: string;
   token: string;
   onParticipantsChanged: (participants: LiveKitParticipantState[]) => void;
+  onMediaStreamsChanged: (streams: LiveKitMediaStreamState[]) => void;
   onConnectionStatus: (status: ConnectionStatus, message: string) => void;
+  onPermissionsChanged?: (permissions: LiveKitPermissionState) => void;
 };
 
 export type LiveKitSession = {
@@ -72,6 +90,22 @@ export async function connectLiveKitSession(options: ConnectLiveKitOptions): Pro
     options.onParticipantsChanged(participants);
   };
 
+  const emitMediaStreams = () => {
+    options.onMediaStreamsChanged(collectMediaStreams(room, Track));
+  };
+
+  const emitPermissions = () => {
+    options.onPermissionsChanged?.({
+      canPublish: room.localParticipant.permissions?.canPublish ?? true,
+      canSubscribe: room.localParticipant.permissions?.canSubscribe ?? true
+    });
+  };
+
+  const emitRoomState = () => {
+    emitParticipants();
+    emitMediaStreams();
+  };
+
   const handleConnectionState = (state: ConnectionState) => {
     const nextStatus =
       state === ConnectionState.Connected
@@ -96,26 +130,36 @@ export async function connectLiveKitSession(options: ConnectLiveKitOptions): Pro
 
   room
     .on(RoomEvent.ConnectionStateChanged, handleConnectionState)
-    .on(RoomEvent.ParticipantConnected, emitParticipants)
+    .on(RoomEvent.ParticipantConnected, emitRoomState)
     .on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
       cleanupParticipantAudio(participant.identity);
-      emitParticipants();
+      emitRoomState();
     })
     .on(RoomEvent.TrackSubscribed, (track: Track, _publication, participant: RemoteParticipant) => {
       attachAudioTrack(track, participant);
-      emitParticipants();
+      emitRoomState();
     })
     .on(RoomEvent.TrackUnsubscribed, (_track, _publication, participant: RemoteParticipant) => {
       cleanupParticipantAudio(participant.identity);
-      emitParticipants();
+      emitRoomState();
     })
-    .on(RoomEvent.TrackMuted, emitParticipants)
-    .on(RoomEvent.TrackUnmuted, emitParticipants)
-    .on(RoomEvent.ActiveSpeakersChanged, emitParticipants);
+    .on(RoomEvent.TrackMuted, emitRoomState)
+    .on(RoomEvent.TrackUnmuted, emitRoomState)
+    .on(RoomEvent.TrackPublished, emitMediaStreams)
+    .on(RoomEvent.TrackUnpublished, emitMediaStreams)
+    .on(RoomEvent.LocalTrackPublished, emitMediaStreams)
+    .on(RoomEvent.LocalTrackUnpublished, emitMediaStreams)
+    .on(RoomEvent.ActiveSpeakersChanged, emitParticipants)
+    .on(RoomEvent.ParticipantPermissionsChanged, (_previousPermissions, participant: Participant) => {
+      if (participant.isLocal) {
+        emitPermissions();
+      }
+    });
 
   handleConnectionState(ConnectionState.Connecting);
   await room.connect(options.url, options.token);
-  emitParticipants();
+  emitPermissions();
+  emitRoomState();
 
   return {
     disconnect: () => {
@@ -131,17 +175,17 @@ export async function connectLiveKitSession(options: ConnectLiveKitOptions): Pro
     },
     setMicrophoneEnabled: async (enabled) => {
       await room.localParticipant.setMicrophoneEnabled(enabled);
-      emitParticipants();
+      emitRoomState();
       return room.localParticipant.isMicrophoneEnabled;
     },
     setCameraEnabled: async (enabled) => {
       await room.localParticipant.setCameraEnabled(enabled);
-      emitParticipants();
+      emitRoomState();
       return room.localParticipant.isCameraEnabled;
     },
     setScreenShareEnabled: async (enabled) => {
       await room.localParticipant.setScreenShareEnabled(enabled);
-      emitParticipants();
+      emitRoomState();
       return room.localParticipant.isScreenShareEnabled;
     },
     setDeafenEnabled: (enabled) => {
@@ -164,4 +208,58 @@ function buildParticipantState(participant: Participant, isLocal: boolean): Live
     isSpeaking: participant.isSpeaking,
     isLocal
   };
+}
+
+function collectMediaStreams(
+  room: Room,
+  trackNamespace: {
+    Source: {
+      ScreenShare: Track.Source;
+      Camera: Track.Source;
+    };
+  }
+): LiveKitMediaStreamState[] {
+  const participants = [room.localParticipant, ...Array.from(room.remoteParticipants.values())];
+
+  return participants
+    .flatMap((participant) => {
+      const screenSharePublication = participant.getTrackPublication(trackNamespace.Source.ScreenShare);
+      const cameraPublication = participant.getTrackPublication(trackNamespace.Source.Camera);
+
+      return [screenSharePublication, cameraPublication]
+        .flatMap((publication) => {
+          const videoTrack = publication?.videoTrack;
+
+          if (!publication || !videoTrack || publication.isMuted) {
+            return [];
+          }
+
+          const source: LiveKitMediaStreamState["source"] =
+            publication.source === trackNamespace.Source.ScreenShare ? "screen_share" : "camera";
+
+          return [
+            {
+              id: `${participant.identity}:${source}`,
+              participantIdentity: participant.identity,
+              source,
+              isLocal: participant.isLocal,
+              track: videoTrack
+            }
+          ];
+        })
+        .sort((left, right) => sortStreams(left, right));
+    })
+    .sort((left, right) => sortStreams(left, right));
+}
+
+function sortStreams(left: LiveKitMediaStreamState, right: LiveKitMediaStreamState) {
+  if (left.source !== right.source) {
+    return left.source === "screen_share" ? -1 : 1;
+  }
+
+  if (left.isLocal !== right.isLocal) {
+    return left.isLocal ? -1 : 1;
+  }
+
+  return left.participantIdentity.localeCompare(right.participantIdentity);
 }

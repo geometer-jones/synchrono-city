@@ -1,191 +1,146 @@
-import { useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { useAppState } from "../app-state";
+import { ResizablePanels } from "../components/resizable-panels";
+import { useNarrowViewport } from "../hooks/use-viewport";
 
 export function ChatsRoute() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [draftNote, setDraftNote] = useState("");
-  const {
-    createPlaceNote,
-    getPlace,
-    getPlaceParticipants,
-    getProfile,
-    joinPlaceCall,
-    listNotesForPlace,
-    listThreads
-  } = useAppState();
+  const { listChatThreads } = useAppState();
+  const threads = listChatThreads();
+  const isNarrowViewport = useNarrowViewport();
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(() => threads[0]?.id ?? null);
+  const [isNarrowThreadOpen, setIsNarrowThreadOpen] = useState(false);
+  const selectedThread = threads.find((thread) => thread.id === selectedThreadId) ?? threads[0] ?? null;
+  const shouldShowThreadList = !isNarrowViewport || !isNarrowThreadOpen;
+  const shouldShowThreadDetail = !isNarrowViewport || isNarrowThreadOpen;
 
-  const threads = listThreads();
-  const selectedGeohash = searchParams.get("geohash") ?? threads[0]?.geohash ?? "";
-  const selectedThread = threads.find((thread) => thread.geohash === selectedGeohash) ?? threads[0];
-  const selectedPlace = selectedThread ? getPlace(selectedThread.geohash) : undefined;
-  const notes = selectedThread ? listNotesForPlace(selectedThread.geohash) : [];
-  const participants = selectedThread ? getPlaceParticipants(selectedThread.geohash) : [];
+  useEffect(() => {
+    if (!isNarrowViewport) {
+      setIsNarrowThreadOpen(false);
+    }
+  }, [isNarrowViewport]);
 
-  function selectThread(geohash: string) {
-    setSearchParams({ geohash });
-  }
-
-  function openNote(noteID: string) {
-    navigate(`/app/pulse?note=${encodeURIComponent(noteID)}`);
-  }
-
-  function openProfile(pubkey: string) {
-    navigate(`/app/pulse?profile=${encodeURIComponent(pubkey)}`);
-  }
-
-  function handleSubmitNote() {
-    if (!selectedThread) {
+  useEffect(() => {
+    if (threads.length === 0) {
+      setSelectedThreadId(null);
+      setIsNarrowThreadOpen(false);
       return;
     }
 
-    const nextNote = createPlaceNote(selectedThread.geohash, draftNote);
-    if (nextNote) {
-      setDraftNote("");
+    if (!selectedThreadId || !threads.some((thread) => thread.id === selectedThreadId)) {
+      setSelectedThreadId(threads[0].id);
+    }
+  }, [selectedThreadId, threads]);
+
+  function handleSelectThread(threadId: string) {
+    setSelectedThreadId(threadId);
+
+    if (isNarrowViewport) {
+      setIsNarrowThreadOpen(true);
     }
   }
 
-  return (
-    <section className="panel route-surface route-surface-chats">
-      <div className="route-header">
-        <div>
-          <p className="section-label">Chats</p>
-          <h2>Place-scoped note stacks</h2>
-          <p className="muted route-header-copy">
-            Threads stay attached to specific geohash rooms, not to a generic inbox.
-          </p>
-        </div>
-        <div className="route-header-meta">
-          <span className="thread-pill">{threads.length} threads</span>
-          {selectedThread?.activeCall ? <span className="thread-pill live">Room active</span> : null}
-        </div>
-      </div>
-
-      <div className="route-columns route-columns-threads">
-        <div className="thread-list" role="list" aria-label="Geo-chat threads">
-          {threads.map((thread) => (
+  const threadListPanel = shouldShowThreadList ? (
+    <div className="thread-scroll-panel thread-scroll-panel-list">
+      <div className="thread-list" role="list" aria-label="Private chat threads">
+        {threads.length > 0 ? (
+          threads.map((thread) => (
             <button
-              key={thread.geohash}
-              className={
-                thread.geohash === selectedThread?.geohash ? "thread-button active" : "thread-button"
-              }
+              key={thread.id}
+              className={thread.id === selectedThread?.id ? "thread-button active" : "thread-button"}
               type="button"
-              onClick={() => selectThread(thread.geohash)}
+              onClick={() => handleSelectThread(thread.id)}
             >
               <span className="thread-button-top">
-                <strong>{thread.geohash}</strong>
+                <strong>{thread.title}</strong>
                 {thread.unread ? <span className="thread-pill">Unread</span> : null}
               </span>
-              <span>{thread.title}</span>
+              <span>{thread.kind === "dm" ? "Direct message" : "Group DM"}</span>
               <small>{thread.summary}</small>
             </button>
-          ))}
-        </div>
-
-        {selectedThread && selectedPlace ? (
-          <div className="thread-detail">
-            <div className="detail-header">
-              <div>
-                <p className="section-label">Selected thread</p>
-                <h3>
-                  {selectedThread.title} · {selectedThread.geohash}
-                </h3>
-              </div>
-              {selectedThread.activeCall ? <span className="thread-pill live">Active call</span> : null}
-            </div>
-
+          ))
+        ) : (
+          <article className="feature-card thread-detail">
+            <p className="section-label">No chats</p>
+            <h3>No private chats yet.</h3>
             <p className="muted">
-              {selectedPlace.neighborhood} · {selectedThread.roomID}
+              Chats now only holds direct messages and group DMs. Public place conversation stays in World and Pulse.
             </p>
-
-            <div className="action-row">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => joinPlaceCall(selectedThread.geohash)}
-              >
-                Join room
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => navigate(`/app?place=${encodeURIComponent(selectedThread.geohash)}`)}
-              >
-                Open in World
-              </button>
-            </div>
-
-            <div className="participant-roster">
-              {participants.map((profile) => (
-                <article key={profile.pubkey} className="mini-card">
-                  <div>
-                    <strong>{profile.displayName}</strong>
-                    <p>{profile.role}</p>
-                  </div>
-                  <small>
-                    Mic {profile.mic ? "on" : "off"} · Cam {profile.cam ? "on" : "off"} · Share{" "}
-                    {profile.screenshare ? "on" : "off"}
-                  </small>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => openProfile(profile.pubkey)}
-                  >
-                    View profile
-                  </button>
-                </article>
-              ))}
-            </div>
-
-            <article className="feature-card">
-              <p className="section-label">Write to place</p>
-              <h3>Post into {selectedThread.title}</h3>
-              <textarea
-                className="note-input"
-                value={draftNote}
-                onChange={(event) => setDraftNote(event.target.value)}
-                placeholder="Add a place note for everyone in this tile."
-              />
-              <div className="action-row">
-                <button className="primary-button" type="button" onClick={handleSubmitNote}>
-                  Publish note
-                </button>
-              </div>
-            </article>
-
-            <div className="note-list">
-              {notes.map((note) => {
-                const author = getProfile(note.authorPubkey);
-
-                return (
-                  <article key={note.id} className="tile-card">
-                    <header>
-                      <div>
-                        <strong>{author?.displayName ?? note.authorPubkey}</strong>
-                        <p className="tile-kicker">{note.createdAt}</p>
-                      </div>
-                      {selectedThread.pinnedNoteId === note.id ? <span className="thread-pill">Pinned</span> : null}
-                    </header>
-                    <p>{note.content}</p>
-                    <small>{note.replies} threaded replies</small>
-                    <div className="action-row">
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => openNote(note.id)}
-                      >
-                        Open in Pulse
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
+          </article>
+        )}
       </div>
-    </section>
-  );
+    </div>
+  ) : null;
+
+  const threadDetailPanel = shouldShowThreadDetail ? (
+    <div className="thread-scroll-panel thread-scroll-panel-detail">
+      {selectedThread ? (
+        <article className="feature-card thread-detail">
+          <div className="detail-header">
+            <div>
+              <p className="section-label">Private inbox</p>
+              <h3>{selectedThread.title}</h3>
+            </div>
+            {isNarrowViewport ? (
+              <button className="secondary-button" type="button" onClick={() => setIsNarrowThreadOpen(false)}>
+                Back to chats
+              </button>
+            ) : null}
+          </div>
+          <p className="thread-detail-copy muted">
+            {selectedThread.kind === "dm" ? "Direct message" : "Group DM"}
+            {" · "}
+            {selectedThread.participants.length} participant{selectedThread.participants.length === 1 ? "" : "s"}
+          </p>
+          <p className="muted">{selectedThread.summary}</p>
+          <p className="muted">
+            Message history is not loaded in this client session yet, but the narrow layout now opens a dedicated
+            thread view instead of splitting the screen.
+          </p>
+          <div className="action-row">
+            <button className="secondary-button" type="button" onClick={() => navigate("/app")}>
+              Open World
+            </button>
+          </div>
+        </article>
+      ) : (
+        <article className="feature-card thread-detail">
+          <p className="section-label">Private inbox</p>
+          <h3>DMs and group DMs land here.</h3>
+          <p className="muted">
+            There are no private threads loaded in this client session yet. Place-based notes and room activity remain
+            on the map.
+          </p>
+          <div className="action-row">
+            <button className="secondary-button" type="button" onClick={() => navigate("/app")}>
+              Open World
+            </button>
+          </div>
+        </article>
+      )}
+    </div>
+  ) : null;
+
+  const threadLayout =
+    !isNarrowViewport && threadListPanel && threadDetailPanel ? (
+      <ResizablePanels
+        className="route-columns route-columns-threads"
+        storageKey="chats"
+        defaultPrimarySize={320}
+        minPrimarySize={240}
+        minSecondarySize={320}
+        handleLabel="Resize chats panels"
+        primary={threadListPanel}
+        secondary={threadDetailPanel}
+      />
+    ) : (
+      <div className="route-columns route-columns-threads">
+        {threadListPanel}
+        {threadDetailPanel}
+      </div>
+    );
+
+  return <section className="panel route-surface route-surface-chats route-surface-split">{threadLayout}</section>;
 }

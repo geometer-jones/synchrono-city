@@ -222,6 +222,30 @@ func TestServiceEvaluate(t *testing.T) {
 	}
 }
 
+func TestServiceEvaluateAllowsDefaultListenerJoinForCohortRoom(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(store.NewMemory(), "operator")
+	service.SetDefaultRoomGrantSource(defaultRoomGrantSourceStub{
+		roomID:       "beacon:9q8yyk",
+		canPublish:   false,
+		canSubscribe: true,
+	})
+
+	got := service.Evaluate(context.Background(), "guest", "media.join", "beacon:9q8yyk")
+	want := Decision{
+		Decision:            "allow",
+		Reason:              "room_default_listener",
+		Standing:            "guest",
+		Scope:               "media.join",
+		ProofRequirementMet: true,
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %+v, got %+v", want, got)
+	}
+}
+
 func seededMemory(seed func(*store.MemoryStore)) *store.MemoryStore {
 	mem := store.NewMemory()
 	seed(mem)
@@ -233,6 +257,20 @@ type failingStore struct {
 	activePolicyErr error
 }
 
+type defaultRoomGrantSourceStub struct {
+	roomID       string
+	canPublish   bool
+	canSubscribe bool
+}
+
 func (s failingStore) ActivePolicyAssignments(context.Context, string, string) ([]store.PolicyAssignment, error) {
 	return nil, s.activePolicyErr
+}
+
+func (s defaultRoomGrantSourceStub) DefaultRoomGrants(roomID string) (bool, bool, bool) {
+	if roomID != s.roomID {
+		return false, false, false
+	}
+
+	return s.canPublish, s.canSubscribe, true
 }

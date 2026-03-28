@@ -1,8 +1,11 @@
 import { ApiError, resolveApiURL } from "./api";
+import { signEventWithPrivateKey } from "./nostr";
 
 const kindHTTPAuth = 27235;
+const kindBlossomAuth = 24242;
 const blossomBaseUrl = import.meta.env.VITE_BLOSSOM_URL ?? "";
 const maxBlossomFileBytes = 50 * 1024 * 1024;
+const blossomAuthorizationTtlSeconds = 60;
 
 const supportedMimePrefixes = ["image/", "audio/", "video/"];
 const supportedMimeTypes = new Set(["application/pdf"]);
@@ -31,6 +34,11 @@ export type BlossomUpload = {
   size: number;
 };
 
+export type MediaSigningOptions = {
+  privateKeyHex?: string;
+  publicKeyHex?: string;
+};
+
 export class MediaAuthError extends Error {
   constructor(message: string) {
     super(message);
@@ -55,29 +63,30 @@ export async function requestLiveKitToken(roomID: string): Promise<LiveKitTokenR
   });
 }
 
-export async function uploadBlossomFile(file: File, signal?: AbortSignal): Promise<BlossomUpload> {
+export async function uploadBlossomFile(
+  file: File,
+  signal?: AbortSignal,
+  signingOptions?: MediaSigningOptions
+): Promise<BlossomUpload> {
   validateBlossomFile(file);
 
   const sha256 = await sha256Hex(file);
-  const uploadURL = new URL("/upload", blossomBaseUrl || window.location.origin);
+  const uploadURL = resolveBlossomURL("upload");
   const response = await fetch(uploadURL, {
     method: "PUT",
     headers: {
       "Content-Type": file.type || "application/octet-stream",
-      Authorization: await createAuthorizationHeader(uploadURL.toString(), "PUT", file)
+      "X-SHA-256": sha256,
+      Authorization: await createBlossomAuthorizationHeader(sha256, signingOptions)
     },
     body: file,
     signal
   });
 
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
+  const data = parseResponseBody(text);
   if (!response.ok) {
-    const message =
-      typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message: unknown }).message)
-        : `Request failed with status ${response.status}`;
-    throw new ApiError(message, response.status, data);
+    throw new ApiError(formatResponseErrorMessage(data, response.status), response.status, data);
   }
 
   const url = extractUploadedURL(data) ?? buildBlossomAssetURL(sha256, file);
@@ -106,20 +115,46 @@ function validateBlossomFile(file: File) {
 async function fetchJSON<T>(url: URL, init: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
+  const data = parseResponseBody(text);
 
   if (!response.ok) {
-    const message =
-      typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message: unknown }).message)
-        : `Request failed with status ${response.status}`;
-    throw new ApiError(message, response.status, data);
+    throw new ApiError(formatResponseErrorMessage(data, response.status), response.status, data);
   }
 
   return data as T;
 }
 
-async function createAuthorizationHeader(url: string, method: string, payload?: string | Blob): Promise<string> {
+function parseResponseBody(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+function formatResponseErrorMessage(data: unknown, status: number) {
+  if (typeof data === "string" && data.length > 0) {
+    return data;
+  }
+
+  if (typeof data === "object" && data !== null && "message" in data) {
+    return String((data as { message: unknown }).message);
+  }
+
+  return `Request failed with status ${status}`;
+}
+
+async function createAuthorizationHeader(
+  url: string,
+  method: string,
+  payload?: string | Blob,
+  signingOptions?: MediaSigningOptions
+): Promise<string> {
   const tags = [
     ["u", url],
     ["method", method]
@@ -134,12 +169,41 @@ async function createAuthorizationHeader(url: string, method: string, payload?: 
     created_at: Math.floor(Date.now() / 1000),
     tags,
     content: ""
-  });
+  }, signingOptions);
 
   return `Nostr ${btoa(JSON.stringify(signedEvent))}`;
 }
 
-async function signEvent(event: NostrEventTemplate): Promise<NostrSignedEvent> {
+async function createBlossomAuthorizationHeader(
+  sha256: string,
+  signingOptions?: MediaSigningOptions
+): Promise<string> {
+  const createdAt = Math.floor(Date.now() / 1000);
+  const signedEvent = await signEvent(
+    {
+      kind: kindBlossomAuth,
+      created_at: createdAt,
+      tags: [
+        ["t", "upload"],
+        ["x", sha256],
+        ["expiration", String(createdAt + blossomAuthorizationTtlSeconds)]
+      ],
+      content: "Authorize upload"
+    },
+    signingOptions
+  );
+
+  return `Nostr ${encodeBase64Url(JSON.stringify(signedEvent))}`;
+}
+
+async function signEvent(
+  event: NostrEventTemplate,
+  signingOptions?: MediaSigningOptions
+): Promise<NostrSignedEvent> {
+  if (signingOptions?.privateKeyHex) {
+    return signEventWithPrivateKey(event, signingOptions.privateKeyHex, signingOptions.publicKeyHex);
+  }
+
   const nostr = window.nostr;
   if (!nostr) {
     throw new MediaAuthError("A Nostr browser extension is required for media requests.");
@@ -152,6 +216,10 @@ async function sha256Hex(value: string | ArrayBuffer | Blob): Promise<string> {
   const bytes = await toUint8Array(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function encodeBase64Url(value: string) {
+  return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 async function toUint8Array(value: string | ArrayBuffer | Blob) {
@@ -172,6 +240,14 @@ async function toUint8Array(value: string | ArrayBuffer | Blob) {
 }
 
 function extractUploadedURL(data: unknown) {
+  if (typeof data === "string") {
+    try {
+      return new URL(data).toString();
+    } catch {
+      return null;
+    }
+  }
+
   if (typeof data !== "object" || data === null) {
     return null;
   }
@@ -186,8 +262,7 @@ function extractUploadedURL(data: unknown) {
 function buildBlossomAssetURL(sha256: string, file: File) {
   const extension = extractExtension(file);
   const suffix = extension ? `.${extension}` : "";
-  const base = blossomBaseUrl.replace(/\/$/, "");
-  return `${base}/${sha256}${suffix}`;
+  return resolveBlossomURL(`${sha256}${suffix}`).toString();
 }
 
 function extractExtension(file: File) {
@@ -202,4 +277,16 @@ function extractExtension(file: File) {
 
   const subtype = file.type.split("/")[1];
   return subtype ? subtype.toLowerCase() : "";
+}
+
+function resolveBlossomURL(path: string) {
+  const normalizedPath = path.replace(/^\/+/, "");
+  const normalizedBaseUrl = blossomBaseUrl.trim();
+
+  if (!normalizedBaseUrl) {
+    return new URL(`/${normalizedPath}`, window.location.origin);
+  }
+
+  const baseWithTrailingSlash = normalizedBaseUrl.endsWith("/") ? normalizedBaseUrl : `${normalizedBaseUrl}/`;
+  return new URL(normalizedPath, baseWithTrailingSlash);
 }

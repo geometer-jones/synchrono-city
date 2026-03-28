@@ -24,6 +24,7 @@ export type Place = {
   neighborhood: string;
   description: string;
   activitySummary: string;
+  picture?: string;
   tags: string[];
   capacity: number;
   occupantPubkeys: string[];
@@ -43,6 +44,16 @@ export type GeoThread = {
   roomID: string;
 };
 
+export type ChatThread = {
+  id: string;
+  kind: "dm" | "group_dm";
+  title: string;
+  summary: string;
+  participants: string[];
+  unread: boolean;
+  activeCall: boolean;
+};
+
 export type GeoNote = {
   id: string;
   geohash: string;
@@ -55,6 +66,13 @@ export type GeoNote = {
 export type FeedSegment = {
   name: string;
   description: string;
+};
+
+export type RelayListEntry = {
+  url: string;
+  name: string;
+  inbox: boolean;
+  outbox: boolean;
 };
 
 export type CrossRelayFeedItem = {
@@ -108,10 +126,22 @@ export type PlaceTile = {
   roomID: string;
 };
 
+export type CallMediaStream = {
+  id: string;
+  pubkey: string;
+  source: "camera" | "screen_share";
+  isLocal: boolean;
+  track: {
+    attach: (element: HTMLMediaElement) => HTMLMediaElement;
+    detach: (element: HTMLMediaElement) => HTMLMediaElement;
+  };
+};
+
 export type CallSession = {
   geohash: string;
   roomID: string;
   placeTitle: string;
+  startedAt?: string;
   participantPubkeys: string[];
   participantStates: Array<{
     pubkey: string;
@@ -119,6 +149,7 @@ export type CallSession = {
     cam: boolean;
     screenshare: boolean;
   }>;
+  mediaStreams: CallMediaStream[];
   transport: "local" | "livekit";
   connectionState: "local_preview" | "connecting" | "connected" | "failed";
   statusMessage: string;
@@ -163,11 +194,23 @@ export function createFallbackParticipantProfile(pubkey: string): ParticipantPro
   };
 }
 
-export function resolveRoomID(geohash: string, operatorPubkey = relayOperatorPubkey) {
-  return `geo:${operatorPubkey}:${geohash}`;
+export function resolveRoomID(geohash: string, _operatorPubkey = relayOperatorPubkey) {
+  return `beacon:${geohash}`;
 }
 
 export function compareDescendingTimestamps(left?: string, right?: string) {
+  const leftTime = parseTimestamp(left);
+  const rightTime = parseTimestamp(right);
+
+  if (leftTime != null && rightTime != null && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  if (rightTime != null && leftTime == null) {
+    return 1;
+  }
+  if (leftTime != null && rightTime == null) {
+    return -1;
+  }
   if (left && right) {
     return right.localeCompare(left);
   }
@@ -180,6 +223,17 @@ export function compareDescendingTimestamps(left?: string, right?: string) {
   return 0;
 }
 
+export function createDefaultRelayListEntry(relayNameValue = relayName, relayURLValue = relayURL): RelayListEntry {
+  const normalizedURL = relayURLValue.trim();
+
+  return {
+    url: normalizedURL,
+    name: relayNameValue.trim() || normalizedURL,
+    inbox: true,
+    outbox: true
+  };
+}
+
 export function createEphemeralPlace(geohash: string): Place {
   return {
     geohash,
@@ -187,7 +241,8 @@ export function createEphemeralPlace(geohash: string): Place {
     neighborhood: "Ad hoc presence",
     description: "No operator-defined place exists for this tile yet.",
     activitySummary: "Presence was set directly from a map click.",
-    tags: ["ad-hoc", "geohash7"],
+    picture: undefined,
+    tags: ["ad-hoc", "geohash8"],
     capacity: 8,
     occupantPubkeys: [],
     unread: false
@@ -213,8 +268,46 @@ export function sortNotesByRecency(notes: GeoNote[]) {
   return [...notes].sort((left, right) => compareDescendingTimestamps(left.createdAt, right.createdAt));
 }
 
+export function sortNotesChronologically(notes: GeoNote[]) {
+  return [...notes].sort((left, right) => compareAscendingTimestamps(left.createdAt, right.createdAt));
+}
+
 export function listNotesForPlace(notes: GeoNote[], geohash: string) {
   return sortNotesByRecency(notes.filter((note) => note.geohash === geohash));
+}
+
+function compareAscendingTimestamps(left?: string, right?: string) {
+  const leftTime = parseTimestamp(left);
+  const rightTime = parseTimestamp(right);
+
+  if (leftTime != null && rightTime != null && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  if (leftTime != null && rightTime == null) {
+    return -1;
+  }
+  if (leftTime == null && rightTime != null) {
+    return 1;
+  }
+  if (left && right) {
+    return left.localeCompare(right);
+  }
+  if (left) {
+    return -1;
+  }
+  if (right) {
+    return 1;
+  }
+  return 0;
+}
+
+function parseTimestamp(value?: string) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function ensureSentence(text: string) {
@@ -290,7 +383,7 @@ export function getPlaceParticipantPubkeys(
   return participants;
 }
 
-export function buildThreads(
+export function buildGeoThreads(
   places: Place[],
   notes: GeoNote[],
   activeCall: CallSession | null,
@@ -325,6 +418,10 @@ export function buildThreads(
       roomID: resolveRoomID(place.geohash, operatorPubkey)
     };
   });
+}
+
+export function buildChatThreads(): ChatThread[] {
+  return [];
 }
 
 export function buildPlaceTiles(
@@ -365,6 +462,29 @@ export function listRecentNotes(notes: GeoNote[]) {
   return sortNotesByRecency(notes);
 }
 
+function normalizeGeohashKey(geohash: string) {
+  return geohash.trim().toLowerCase();
+}
+
+function buildBeaconGeohashSet(places: Place[]) {
+  return new Set(places.map((place) => normalizeGeohashKey(place.geohash)).filter(Boolean));
+}
+
+export function isBeaconThreadNote(note: GeoNote, places: Place[]) {
+  const normalizedGeohash = normalizeGeohashKey(note.geohash);
+  if (!normalizedGeohash) {
+    return false;
+  }
+
+  return buildBeaconGeohashSet(places).has(normalizedGeohash);
+}
+
+export function listPulseLocalNotes(places: Place[], notes: GeoNote[]) {
+  const beaconGeohashes = buildBeaconGeohashSet(places);
+
+  return listRecentNotes(notes).filter((note) => !beaconGeohashes.has(normalizeGeohashKey(note.geohash)));
+}
+
 export function listNotesByAuthor(notes: GeoNote[], pubkey: string) {
   return sortNotesByRecency(notes.filter((note) => note.authorPubkey === pubkey));
 }
@@ -380,7 +500,7 @@ export function buildPulseFeedItems(
   const placesByGeohash = buildPlaceMap(places);
   const profilesByPubkey = buildParticipantMap(profiles);
 
-  const localItems: PulseFeedItem[] = listRecentNotes(notes).map((note) => ({
+  const localItems: PulseFeedItem[] = listPulseLocalNotes(places, notes).map((note) => ({
     id: `pulse-local-${note.id}`,
     lane: "Local",
     kind: "local_note",
