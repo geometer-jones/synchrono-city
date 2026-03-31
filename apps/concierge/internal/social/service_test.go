@@ -1,10 +1,13 @@
 package social
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
 func TestNewService(t *testing.T) {
@@ -261,11 +264,13 @@ func TestCreateOrReturnBeacon(t *testing.T) {
 
 	t.Run("creates a new beacon for an empty geohash", func(t *testing.T) {
 		result, err := svc.CreateOrReturnBeacon(
+			context.Background(),
 			"9q8yyk34",
 			"Lantern Point",
 			"https://example.com/beacon.png",
 			"Meet after sunset.",
 			[]string{"cohort", "curriculum:zero-to-hero", "cohort"},
+			"",
 		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -291,7 +296,7 @@ func TestCreateOrReturnBeacon(t *testing.T) {
 	})
 
 	t.Run("returns the existing beacon instead of creating a duplicate", func(t *testing.T) {
-		result, err := svc.CreateOrReturnBeacon("9q8yyk34", "Duplicate", "", "Ignored", nil)
+		result, err := svc.CreateOrReturnBeacon(context.Background(), "9q8yyk34", "Duplicate", "", "Ignored", nil, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -307,9 +312,44 @@ func TestCreateOrReturnBeacon(t *testing.T) {
 	})
 
 	t.Run("rejects creating a new beacon without a name", func(t *testing.T) {
-		_, err := svc.CreateOrReturnBeacon("9q8yyk99", "   ", "", "", nil)
+		_, err := svc.CreateOrReturnBeacon(context.Background(), "9q8yyk99", "   ", "", "", nil, "")
 		if err != ErrEmptyBeaconName {
 			t.Fatalf("expected ErrEmptyBeaconName, got %v", err)
+		}
+	})
+
+	t.Run("grants the creator full room access for a newly created beacon", func(t *testing.T) {
+		store := store.NewMemory()
+		creatorPubkey := "npub1creator"
+		svcWithStore := &Service{
+			operatorPubkey:    "npub1operator",
+			currentUserPubkey: DefaultCurrentUserPubkey,
+			store:             store,
+			places:            []Place{},
+		}
+
+		result, err := svcWithStore.CreateOrReturnBeacon(
+			context.Background(),
+			"9q8yyk55",
+			"Speaker Room",
+			"",
+			"",
+			nil,
+			creatorPubkey,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Created {
+			t.Fatal("expected created beacon result")
+		}
+
+		permission, err := store.LatestRoomPermission(context.Background(), creatorPubkey, "beacon:9q8yyk55")
+		if err != nil {
+			t.Fatalf("expected creator room permission: %v", err)
+		}
+		if !permission.CanJoin || !permission.CanPublish || !permission.CanSubscribe {
+			t.Fatalf("expected creator full room grants, got %+v", permission)
 		}
 	})
 }
@@ -335,8 +375,14 @@ func TestDefaultRoomGrants(t *testing.T) {
 		t.Fatalf("expected cohort beacon listener grants, got ok=%t publish=%t subscribe=%t", ok, canPublish, canSubscribe)
 	}
 
-	if _, _, ok := svc.DefaultRoomGrants("beacon:9q8yyk55"); ok {
-		t.Fatal("expected plain beacon to require explicit room permission")
+	canPublish, canSubscribe, ok = svc.DefaultRoomGrants("beacon:9q8yyk55")
+	if !ok || !canPublish || !canSubscribe {
+		t.Fatalf("expected plain beacon speaker grants, got ok=%t publish=%t subscribe=%t", ok, canPublish, canSubscribe)
+	}
+
+	canPublish, canSubscribe, ok = svc.DefaultRoomGrants("beacon:9q8yyq99")
+	if !ok || !canPublish || !canSubscribe {
+		t.Fatalf("expected unknown beacon room to inherit speaker grants, got ok=%t publish=%t subscribe=%t", ok, canPublish, canSubscribe)
 	}
 }
 

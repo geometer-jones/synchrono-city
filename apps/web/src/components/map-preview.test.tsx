@@ -1,8 +1,15 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const appearanceMock = vi.hoisted(() => ({
+  appearanceMode: "dark" as "dark" | "light" | "system",
+  resolvedAppearanceMode: "dark" as "dark" | "light",
+  setAppearanceMode: vi.fn()
+}));
+
 const mapboxMocks = vi.hoisted(() => {
   const instances: Array<{
+    _showingGlobe: ReturnType<typeof vi.fn>;
     addLayer: ReturnType<typeof vi.fn>;
     addSource: ReturnType<typeof vi.fn>;
     easeTo: ReturnType<typeof vi.fn>;
@@ -18,6 +25,13 @@ const mapboxMocks = vi.hoisted(() => {
     project: ReturnType<typeof vi.fn>;
     queryRenderedFeatures: ReturnType<typeof vi.fn>;
     remove: ReturnType<typeof vi.fn>;
+    transform: {
+      _center: { lat: number; lng: number };
+      _pitch: number;
+      angle: number;
+      cameraToCenterDistance: number;
+      pixelsPerMeter: number;
+    };
   }> = [];
 
   const Map = vi.fn().mockImplementation(() => {
@@ -39,6 +53,7 @@ const mapboxMocks = vi.hoisted(() => {
     };
 
     const instance = {
+      _showingGlobe: vi.fn(() => false),
       addLayer: vi.fn((layer: { id: string }) => {
         layers.add(layer.id);
       }),
@@ -72,7 +87,14 @@ const mapboxMocks = vi.hoisted(() => {
       }),
       project: vi.fn(() => ({ x: 120, y: 160 })),
       queryRenderedFeatures: vi.fn(() => []),
-      remove: vi.fn()
+      remove: vi.fn(),
+      transform: {
+        _center: { lng: -122.4194, lat: 37.7749 },
+        _pitch: 0,
+        angle: 0,
+        cameraToCenterDistance: 1000,
+        pixelsPerMeter: 1
+      }
     };
 
     instances.push(instance);
@@ -96,6 +118,10 @@ vi.mock("mapbox-gl", () => ({
     LngLatBounds: mapboxMocks.LngLatBounds,
     accessToken: ""
   }
+}));
+
+vi.mock("../appearance", () => ({
+  useAppearance: () => appearanceMock
 }));
 
 function createLocalStorageMock() {
@@ -124,9 +150,14 @@ describe("MapPreview", () => {
     vi.resetModules();
     mapboxMocks.instances.length = 0;
     mapboxMocks.Map.mockClear();
+    appearanceMock.appearanceMode = "dark";
+    appearanceMock.resolvedAppearanceMode = "dark";
+    appearanceMock.setAppearanceMode.mockClear();
     vi.stubEnv("MODE", "development");
     vi.stubEnv("VITE_MAPBOX_ACCESS_TOKEN", "test-token");
-    vi.stubEnv("VITE_MAPBOX_STYLE_URL", "mapbox://styles/test/style");
+    vi.stubEnv("VITE_MAPBOX_STYLE_URL", "");
+    vi.stubEnv("VITE_MAPBOX_DARK_STYLE_URL", "mapbox://styles/test/dark");
+    vi.stubEnv("VITE_MAPBOX_LIGHT_STYLE_URL", "mapbox://styles/test/light");
 
     const localStorageMock = createLocalStorageMock();
     Object.defineProperty(window, "localStorage", {
@@ -138,6 +169,49 @@ describe("MapPreview", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     window.localStorage.clear();
+  });
+
+  it("loads the dark map style when the resolved appearance is dark", async () => {
+    const { MapPreview } = await import("./map-preview");
+
+    render(<MapPreview tiles={[]} />);
+
+    await waitFor(() => {
+      expect(mapboxMocks.Map).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mapboxMocks.Map).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        style: "mapbox://styles/test/dark"
+      })
+    );
+  });
+
+  it("recreates the map with the light map style when the appearance switches", async () => {
+    const { MapPreview } = await import("./map-preview");
+
+    const { rerender } = render(<MapPreview tiles={[]} />);
+
+    await waitFor(() => {
+      expect(mapboxMocks.Map).toHaveBeenCalledTimes(1);
+    });
+
+    const firstMapInstance = mapboxMocks.instances[0];
+
+    appearanceMock.appearanceMode = "light";
+    appearanceMock.resolvedAppearanceMode = "light";
+    rerender(<MapPreview tiles={[]} />);
+
+    await waitFor(() => {
+      expect(mapboxMocks.Map).toHaveBeenCalledTimes(2);
+    });
+
+    expect(firstMapInstance.remove).toHaveBeenCalledTimes(1);
+    expect(mapboxMocks.Map).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        style: "mapbox://styles/test/light"
+      })
+    );
   });
 
   it("keeps the same map instance when the selection handler changes", async () => {
@@ -456,6 +530,31 @@ describe("MapPreview", () => {
     expect(onSelectTile).not.toHaveBeenCalled();
   });
 
+  it("calls the pending marker dismiss handler when the pending marker is clicked", async () => {
+    const { MapPreview } = await import("./map-preview");
+    const onDismissPendingMarker = vi.fn();
+
+    render(
+      <MapPreview
+        tiles={[]}
+        pendingGeohash="9q8yyk34"
+        onDismissPendingMarker={onDismissPendingMarker}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mapboxMocks.Map).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /remove pending beacon marker/i
+      })
+    );
+
+    expect(onDismissPendingMarker).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the same map instance when rerendered with equivalent tile data", async () => {
     const { MapPreview } = await import("./map-preview");
     const tiles = [
@@ -517,6 +616,71 @@ describe("MapPreview", () => {
     });
 
     expect(marker).toBeInTheDocument();
+  });
+
+  it("hides markers and cards when they move behind the visible globe", async () => {
+    const { MapPreview } = await import("./map-preview");
+    const tiles = [
+      {
+        geohash: "9q8yyk",
+        title: "Civic Plaza",
+        roomID: "geo:npub1operator:9q8yyk",
+        latestNote: "Meet at the fountain.",
+        noteCount: 3,
+        participants: ["npub1aurora"]
+      }
+    ];
+
+    render(
+      <MapPreview
+        tiles={tiles}
+        markerCards={[
+          {
+            geohash: "9q8yyk",
+            ariaLabel: "Marker card Civic Plaza",
+            content: <article>Civic Plaza details</article>
+          }
+        ]}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mapboxMocks.Map).toHaveBeenCalledTimes(1);
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: /civic plaza 9q8yyk has 3 notes and 1 live participants/i
+      })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/marker card civic plaza/i)).toBeInTheDocument();
+
+    const mapInstance = mapboxMocks.instances[0];
+    mapInstance._showingGlobe.mockReturnValue(true);
+    mapInstance.transform._center = {
+      lng: 57.5806,
+      lat: -37.7749
+    };
+
+    const moveHandlers = mapInstance.on.mock.calls
+      .filter(([event, layerOrHandler]) => event === "move" && typeof layerOrHandler === "function")
+      .map(([, handler]) => handler as () => void);
+
+    expect(moveHandlers.length).toBeGreaterThan(0);
+
+    for (const handler of moveHandlers) {
+      handler();
+    }
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", {
+          name: /civic plaza 9q8yyk has 3 notes and 1 live participants/i
+        })
+      ).not.toBeInTheDocument();
+    });
+
+    expect(screen.queryByLabelText(/marker card civic plaza/i)).not.toBeInTheDocument();
   });
 
   it("forwards wheel zoom from markers and marker cards to the map container", async () => {

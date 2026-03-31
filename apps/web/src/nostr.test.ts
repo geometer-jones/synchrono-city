@@ -1,7 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { importLocalKeyMaterial } from "./key-manager";
-import { publishGeoNote, queryGeoNotes, queryProfileMetadata, signEvent, signEventWithPrivateKey } from "./nostr";
+import {
+  beaconDefinitionKind,
+  publishBeaconDefinition,
+  publishGeoNote,
+  publishGeoReaction,
+  queryBeaconDefinitions,
+  queryGeoNotes,
+  queryProfileMetadata,
+  signEvent,
+  signEventWithPrivateKey
+} from "./nostr";
 
 function createRelayQueryWebSocketMock(
   responsesByAuthorHex: Record<string, Array<{ createdAt: number; content: Record<string, string> }>>
@@ -83,6 +93,90 @@ function createRelayQueryWebSocketMock(
 
         this.emit("message", {
           data: JSON.stringify(["EOSE", subscriptionID])
+        });
+      });
+    }
+
+    close() {
+      this.readyState = MockWebSocket.CLOSED;
+      queueMicrotask(() => {
+        this.emit("close");
+      });
+    }
+
+    private emit(type: string, event?: { data?: string }) {
+      for (const listener of this.listeners.get(type) ?? []) {
+        listener(event);
+      }
+    }
+  }
+
+  return {
+    instances,
+    WebSocket: MockWebSocket as unknown as typeof WebSocket
+  };
+}
+
+function createManualRelayWebSocketMock() {
+  const instances: Array<{
+    url: string;
+    sentMessages: string[];
+    deliverMessage: (payload: unknown) => void;
+  }> = [];
+
+  class MockWebSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+
+    readyState = MockWebSocket.CONNECTING;
+    url: string;
+    sentMessages: string[] = [];
+    private listeners = new Map<string, Set<(event?: { data?: string }) => void>>();
+
+    constructor(url: string) {
+      this.url = url;
+      instances.push({
+        url: this.url,
+        sentMessages: this.sentMessages,
+        deliverMessage: (payload) => {
+          this.emit("message", {
+            data: JSON.stringify(payload)
+          });
+        }
+      });
+      queueMicrotask(() => {
+        this.readyState = MockWebSocket.OPEN;
+        this.emit("open");
+      });
+    }
+
+    addEventListener(type: string, listener: (event?: { data?: string }) => void) {
+      const listeners = this.listeners.get(type) ?? new Set();
+      listeners.add(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    removeEventListener(type: string, listener: (event?: { data?: string }) => void) {
+      this.listeners.get(type)?.delete(listener);
+    }
+
+    send(data: string) {
+      this.sentMessages.push(data);
+      const payload = JSON.parse(data) as unknown;
+      if (!Array.isArray(payload) || payload[0] !== "EVENT" || typeof payload[1] !== "object" || !payload[1]) {
+        return;
+      }
+
+      const event = payload[1] as Partial<NostrSignedEvent>;
+      if (typeof event.id !== "string") {
+        return;
+      }
+
+      queueMicrotask(() => {
+        this.emit("message", {
+          data: JSON.stringify(["OK", event.id, true, ""])
         });
       });
     }
@@ -192,9 +286,12 @@ describe("queryProfileMetadata", () => {
 });
 
 describe("queryGeoNotes", () => {
-  it("queries kind 1 notes for a geohash and normalizes relay events into app notes", async () => {
+  it("queries kind 1 notes and kind 7 reactions for a geohash and normalizes relay events into app notes", async () => {
     const author = importLocalKeyMaterial(
       "1111111111111111111111111111111111111111111111111111111111111111"
+    );
+    const participant = importLocalKeyMaterial(
+      "2222222222222222222222222222222222222222222222222222222222222222"
     );
     const relaySocketMock = createRelayQueryWebSocketMock({});
     const originalWebSocket = globalThis.WebSocket;
@@ -211,7 +308,7 @@ describe("queryGeoNotes", () => {
         "REQ",
         expect.any(String),
         {
-          kinds: [1],
+          kinds: [1, 7],
           "#g": ["9q8yyk"]
         }
       ]);
@@ -238,9 +335,32 @@ describe("queryGeoNotes", () => {
           pubkey: author.publicKeyHex,
           created_at: 100,
           kind: 1,
-          tags: [["g", "9q8yyk"]],
+          tags: [
+            ["g", "9q8yyk"],
+            ["e", "note-2", "", "root", author.publicKeyHex],
+            ["p", author.publicKeyHex],
+            ["p", participant.publicKeyHex]
+          ],
           content: "Earlier plaza note",
           sig: "sig-1"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "reaction-1",
+          pubkey: participant.publicKeyHex,
+          created_at: 250,
+          kind: 7,
+          tags: [
+            ["g", "9q8yyk"],
+            ["e", "note-2", "ws://localhost:8080/", author.publicKeyHex],
+            ["p", author.publicKeyHex],
+            ["k", "1"]
+          ],
+          content: "🔥",
+          sig: "sig-reaction-1"
         }
       ]);
       relaySocketMock.instances[0]?.deliverMessage(["EOSE", subscriptionID]);
@@ -252,7 +372,8 @@ describe("queryGeoNotes", () => {
           authorPubkey: author.publicKeyNpub,
           content: "Latest plaza note",
           createdAt: "1970-01-01T00:03:20.000Z",
-          replies: 0
+          replies: 1,
+          reactions: [{ emoji: "🔥", count: 1 }]
         },
         {
           id: "note-1",
@@ -260,9 +381,261 @@ describe("queryGeoNotes", () => {
           authorPubkey: author.publicKeyNpub,
           content: "Earlier plaza note",
           createdAt: "1970-01-01T00:01:40.000Z",
-          replies: 0
+          replies: 0,
+          replyTargetId: "note-2",
+          rootNoteId: "note-2",
+          taggedPubkeys: [author.publicKeyNpub, participant.publicKeyNpub]
         }
       ]);
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("queryBeaconDefinitions", () => {
+  it("queries relay-native beacon definitions and keeps the latest event per geohash", async () => {
+    const author = importLocalKeyMaterial(
+      "5555555555555555555555555555555555555555555555555555555555555555"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      const beaconsPromise = queryBeaconDefinitions("ws://localhost:8080", "9Q8YYK");
+      await Promise.resolve();
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const requestPayload = JSON.parse(String(sentPayload)) as [string, string, { kinds?: number[]; "#d"?: string[] }];
+      expect(requestPayload).toEqual([
+        "REQ",
+        expect.any(String),
+        {
+          kinds: [beaconDefinitionKind],
+          "#d": ["9q8yyk"]
+        }
+      ]);
+
+      const subscriptionID = requestPayload[1];
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "beacon-old",
+          pubkey: author.publicKeyHex,
+          created_at: 100,
+          kind: beaconDefinitionKind,
+          tags: [["d", "9q8yyk"], ["g", "9q8yyk"], ["t", "beacon"], ["t", "cohort"]],
+          content: JSON.stringify({
+            name: "Older plaza",
+            about: "Superseded",
+            tags: ["beacon", "cohort"]
+          }),
+          sig: "sig-old"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "beacon-new",
+          pubkey: author.publicKeyHex,
+          created_at: 200,
+          kind: beaconDefinitionKind,
+          tags: [["d", "9q8yyk"], ["g", "9q8yyk"], ["t", "beacon"], ["t", "mutual-aid"]],
+          content: JSON.stringify({
+            name: "Beacon Plaza",
+            picture: "https://images.example.test/beacon.png",
+            about: "Relay-native metadata",
+            tags: ["beacon", "mutual-aid"]
+          }),
+          sig: "sig-new"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage(["EOSE", subscriptionID]);
+
+      await expect(beaconsPromise).resolves.toEqual([
+        {
+          geohash: "9q8yyk",
+          title: "Beacon Plaza",
+          neighborhood: "Newly lit beacon",
+          description: "Relay-native metadata",
+          activitySummary: "Relay-native metadata",
+          createdAt: "1970-01-01T00:03:20.000Z",
+          picture: "https://images.example.test/beacon.png",
+          ownerPubkey: author.publicKeyNpub,
+          memberPubkeys: [author.publicKeyNpub],
+          tags: ["beacon", "geohash8", "mutual-aid"],
+          capacity: 8,
+          occupantPubkeys: [],
+          unread: false
+        }
+      ]);
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("publishGeoNote", () => {
+  it("publishes a tagged reply note with root and participant references", async () => {
+    const author = importLocalKeyMaterial(
+      "7777777777777777777777777777777777777777777777777777777777777777"
+    );
+    const targetAuthor = importLocalKeyMaterial(
+      "8888888888888888888888888888888888888888888888888888888888888888"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      await publishGeoNote(
+        "ws://localhost:8080",
+        "9Q8YYK",
+        "Thread follow-up",
+        {
+          privateKeyHex: author.privateKeyHex,
+          publicKeyHex: author.publicKeyHex
+        },
+        {
+          replyTarget: {
+            id: "reply-note-id",
+            authorPubkey: targetAuthor.publicKeyNpub,
+            rootNoteId: "root-note-id",
+            taggedPubkeys: [targetAuthor.publicKeyNpub, author.publicKeyNpub]
+          }
+        }
+      );
+
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const eventMessage = JSON.parse(String(sentPayload)) as [string, NostrSignedEvent];
+      expect(eventMessage[0]).toBe("EVENT");
+      expect(eventMessage[1].kind).toBe(1);
+      expect(eventMessage[1].tags).toEqual([
+        ["g", "9q8yyk"],
+        ["e", "root-note-id", "ws://localhost:8080/", "root", targetAuthor.publicKeyHex],
+        ["e", "reply-note-id", "ws://localhost:8080/", "reply", targetAuthor.publicKeyHex],
+        ["p", targetAuthor.publicKeyHex],
+        ["p", author.publicKeyHex]
+      ]);
+      expect(eventMessage[1].content).toBe("Thread follow-up");
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("publishGeoReaction", () => {
+  it("publishes an emoji reaction as a kind 7 event with target references", async () => {
+    const author = importLocalKeyMaterial(
+      "9999999999999999999999999999999999999999999999999999999999999999"
+    );
+    const targetAuthor = importLocalKeyMaterial(
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      await publishGeoReaction(
+        "ws://localhost:8080",
+        {
+          id: "target-note-id",
+          geohash: "9Q8YYK",
+          authorPubkey: targetAuthor.publicKeyNpub
+        },
+        "🔥",
+        {
+          privateKeyHex: author.privateKeyHex,
+          publicKeyHex: author.publicKeyHex
+        }
+      );
+
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const eventMessage = JSON.parse(String(sentPayload)) as [string, NostrSignedEvent];
+      expect(eventMessage[0]).toBe("EVENT");
+      expect(eventMessage[1].kind).toBe(7);
+      expect(eventMessage[1].tags).toEqual([
+        ["g", "9q8yyk"],
+        ["e", "target-note-id", "ws://localhost:8080/", targetAuthor.publicKeyHex],
+        ["p", targetAuthor.publicKeyHex],
+        ["k", "1"]
+      ]);
+      expect(eventMessage[1].content).toBe("🔥");
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("publishBeaconDefinition", () => {
+  it("publishes a relay-native beacon definition as a parameterized replaceable event", async () => {
+    const author = importLocalKeyMaterial(
+      "6666666666666666666666666666666666666666666666666666666666666666"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      const beacon = await publishBeaconDefinition(
+        "ws://localhost:8080",
+        "9Q8YYK",
+        {
+          name: "Beacon Plaza",
+          picture: "https://images.example.test/beacon.png",
+          about: "Relay-native metadata",
+          tags: ["mutual-aid", "Beacon"]
+        },
+        {
+          privateKeyHex: author.privateKeyHex,
+          publicKeyHex: author.publicKeyHex
+        }
+      );
+
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const eventMessage = JSON.parse(String(sentPayload)) as [string, NostrSignedEvent];
+      expect(eventMessage[0]).toBe("EVENT");
+      expect(eventMessage[1].kind).toBe(beaconDefinitionKind);
+      expect(eventMessage[1].tags).toEqual([
+        ["d", "9q8yyk"],
+        ["g", "9q8yyk"],
+        ["t", "beacon"],
+        ["t", "geohash8"],
+        ["t", "mutual-aid"]
+      ]);
+      expect(JSON.parse(eventMessage[1].content)).toEqual({
+        name: "Beacon Plaza",
+        picture: "https://images.example.test/beacon.png",
+        about: "Relay-native metadata",
+        tags: ["beacon", "geohash8", "mutual-aid"]
+      });
+
+      expect(beacon).toEqual({
+        geohash: "9q8yyk",
+        title: "Beacon Plaza",
+        neighborhood: "Newly lit beacon",
+        description: "Relay-native metadata",
+        activitySummary: "Relay-native metadata",
+        createdAt: expect.any(String),
+        picture: "https://images.example.test/beacon.png",
+        ownerPubkey: author.publicKeyNpub,
+        memberPubkeys: [author.publicKeyNpub],
+        tags: ["beacon", "geohash8", "mutual-aid"],
+        capacity: 8,
+        occupantPubkeys: [],
+        unread: false
+      });
     } finally {
       globalThis.WebSocket = originalWebSocket;
     }

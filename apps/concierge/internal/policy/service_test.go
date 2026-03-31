@@ -105,6 +105,21 @@ func TestServiceEvaluate(t *testing.T) {
 			want:    Decision{Decision: "allow", Reason: "room_permission", Standing: "guest", Scope: "media.join", ProofRequirementMet: true},
 		},
 		{
+			name: "relay owner standing allows media join without room permission",
+			store: seededMemory(func(s *store.MemoryStore) {
+				_, _ = s.CreateStandingRecord(ctx, store.StandingRecord{
+					SubjectPubkey:   "owner",
+					Standing:        "owner",
+					Scope:           store.DefaultScopeValue,
+					GrantedByPubkey: operator,
+				})
+			}),
+			subject: "owner",
+			cap:     "media.join",
+			roomID:  "room-2",
+			want:    Decision{Decision: "allow", Reason: "local_standing", Standing: "owner", Scope: "media.join", ProofRequirementMet: true},
+		},
+		{
 			name:    "room permission missing denies media publish",
 			store:   store.NewMemory(),
 			subject: "guest",

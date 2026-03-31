@@ -22,6 +22,7 @@ vi.mock("./livekit-session", () => ({
   connectLiveKitSession: liveKitMocks.connectLiveKitSessionMock
 }));
 
+import { AppearanceProvider, appearanceStorageKey } from "./appearance";
 import { AppShell } from "./routes/app-shell";
 import { ChatsRoute } from "./routes/chats-route";
 import { PulseRoute } from "./routes/pulse-route";
@@ -38,6 +39,8 @@ type NotePayload = NonNullable<BootstrapPayload["notes"]>[number];
 type FeedSegmentPayload = NonNullable<BootstrapPayload["feed_segments"]>[number];
 type RelayListPayload = NonNullable<BootstrapPayload["relay_list"]>[number];
 type CrossRelayItemPayload = NonNullable<BootstrapPayload["cross_relay_items"]>[number];
+
+const originalMatchMedia = window.matchMedia;
 
 function createBootstrapPayload(overrides: Partial<BootstrapPayload> = {}): BootstrapPayload {
   return {
@@ -291,6 +294,55 @@ function createOperatorBootstrap(): BootstrapPayload {
   });
 }
 
+function mockColorSchemePreference(matches: boolean) {
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  let currentMatches = matches;
+
+  const mediaQueryList = {
+    media: "(prefers-color-scheme: dark)",
+    get matches() {
+      return currentMatches;
+    },
+    onchange: null,
+    addEventListener: vi.fn((_event: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") {
+        listeners.add(listener as (event: MediaQueryListEvent) => void);
+      }
+    }),
+    removeEventListener: vi.fn((_event: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") {
+        listeners.delete(listener as (event: MediaQueryListEvent) => void);
+      }
+    }),
+    addListener: vi.fn((listener: (event: MediaQueryListEvent) => void) => {
+      listeners.add(listener);
+    }),
+    removeListener: vi.fn((listener: (event: MediaQueryListEvent) => void) => {
+      listeners.delete(listener);
+    }),
+    dispatchEvent: vi.fn()
+  } as unknown as MediaQueryList;
+
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => {
+      if (query !== "(prefers-color-scheme: dark)") {
+        throw new Error(`Unexpected media query: ${query}`);
+      }
+
+      return mediaQueryList;
+    })
+  });
+
+  return {
+    setMatches(nextMatches: boolean) {
+      currentMatches = nextMatches;
+      const event = { matches: nextMatches, media: mediaQueryList.media } as MediaQueryListEvent;
+      listeners.forEach((listener) => listener(event));
+    }
+  };
+}
+
 function renderRouter(
   entry: string,
   options?: {
@@ -303,19 +355,21 @@ function renderRouter(
   }
   const user = userEvent.setup();
   const view = render(
-    <ToastProvider>
-      <MemoryRouter initialEntries={[entry]}>
-        <Routes>
-          <Route path="/" element={<SplashRoute />} />
-          <Route path="/app" element={<AppShell />}>
-            <Route index element={<WorldRoute />} />
-            <Route path="chats" element={<ChatsRoute />} />
-            <Route path="pulse" element={<PulseRoute />} />
-            <Route path="settings" element={<SettingsRoute />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
-    </ToastProvider>
+    <AppearanceProvider>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[entry]}>
+          <Routes>
+            <Route path="/" element={<SplashRoute />} />
+            <Route path="/app" element={<AppShell />}>
+              <Route index element={<WorldRoute />} />
+              <Route path="chats" element={<ChatsRoute />} />
+              <Route path="pulse" element={<PulseRoute />} />
+              <Route path="settings" element={<SettingsRoute />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
+    </AppearanceProvider>
   );
   return { user, ...view };
 }
@@ -562,6 +616,17 @@ afterEach(() => {
   if (typeof window.localStorage === "object" && window.localStorage && typeof window.localStorage.clear === "function") {
     window.localStorage.clear();
   }
+  if (originalMatchMedia) {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia
+    });
+  } else {
+    delete (window as Partial<Window>).matchMedia;
+  }
+  delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.themeMode;
+  document.documentElement.style.colorScheme = "";
   delete window.nostr;
 });
 
@@ -582,7 +647,8 @@ describe("app shell", () => {
     expect(await screen.findByRole("button", { name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /warehouse annex 9q8yym has 0 notes and 1 live participants/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /audio fallback 9q8yyt has 0 notes and 1 live participants/i })).toBeInTheDocument();
-    expect(screen.getByText(/select a beacon on the map\./i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/synchrono city manifesto/i)).toBeInTheDocument();
+    expect(screen.getByText(/amid exploding sovereign debt/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/beacon card civic plaza/i)).toBeInTheDocument();
   });
 
@@ -614,7 +680,7 @@ describe("app shell", () => {
         "REQ",
         expect.any(String),
         {
-          kinds: [1],
+          kinds: [1, 7],
           "#g": ["9q8yym"]
         }
       ]);
@@ -674,11 +740,11 @@ describe("app shell", () => {
 
   it("upgrades a joined room with a LiveKit token while keeping the marker card visible", async () => {
     window.nostr = {
-      getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
+      getPublicKey: vi.fn().mockResolvedValue("npub1scout"),
       signEvent: vi.fn().mockImplementation(async (event) => ({
         ...event,
         id: `signed-${event.created_at}`,
-        pubkey: "npub1operator",
+        pubkey: "npub1scout",
         sig: "sig"
       }))
     };
@@ -693,7 +759,7 @@ describe("app shell", () => {
           reason: "room_permission",
           token: {
             token: "jwt-token",
-            identity: "npub1operator",
+            identity: "npub1scout",
             room_id: "geo:npub1operator:9q8yyk",
             livekit_url: "ws://livekit.example.test",
             expires_at: "2026-03-20T12:10:00Z",
@@ -721,12 +787,58 @@ describe("app shell", () => {
 
     expect(markerCard).toBeInTheDocument();
     expect(await screen.findByLabelText(/live call bar/i)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/beacon call media streams/i)).toBeInTheDocument();
     expect(liveKitMocks.connectLiveKitSessionMock).toHaveBeenCalledTimes(1);
     expect(liveKitMocks.session.setMicrophoneEnabled).toHaveBeenCalledWith(true);
 
     await user.click(screen.getByRole("button", { name: /camera off/i }));
+    expect(screen.getByLabelText(/beacon call media streams/i)).toBeInTheDocument();
     expect(liveKitMocks.session.setCameraEnabled).toHaveBeenCalledWith(true);
     expect(screen.getByRole("button", { name: /camera on/i })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps denied joins out of active call mode and only shows the snackbar once", async () => {
+    window.nostr = {
+      getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
+      signEvent: vi.fn().mockImplementation(async (event) => ({
+        ...event,
+        id: `signed-${event.created_at}`,
+        pubkey: "npub1operator",
+        sig: "sig"
+      }))
+    };
+
+    mockFetchWithBootstrap(async (url) => {
+      if (url.pathname === "/api/v1/token") {
+        return jsonResponse(
+          {
+            decision: "deny",
+            reason: "room_permission_denied",
+            scope: "media.join"
+          },
+          403
+        );
+      }
+
+      return undefined;
+    }, createWorldBootstrap());
+
+    const { user } = renderRouter("/app", { bootstrapPayload: createWorldBootstrap() });
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i
+      })
+    );
+    await screen.findByLabelText(/beacon card civic plaza/i);
+    await user.click(screen.getByRole("button", { name: /join call/i }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText("You are not allowed to join this room.")).toHaveLength(1);
+    });
+    expect(screen.queryByLabelText(/live call bar/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /leave call/i })).not.toBeInTheDocument();
+    expect(liveKitMocks.connectLiveKitSessionMock).not.toHaveBeenCalled();
   });
 
   it("does not label ad-hoc room fallback as server unavailable on call-intent client errors", async () => {
@@ -754,7 +866,7 @@ describe("app shell", () => {
     await screen.findByLabelText(/beacon card civic plaza/i);
     await user.click(screen.getByRole("button", { name: /join call/i }));
 
-    expect(await screen.findByRole("button", { name: /leave call/i })).toBeInTheDocument();
+    expect((await screen.findAllByRole("button", { name: /leave call/i })).length).toBeGreaterThan(0);
     await waitFor(() =>
       expect(screen.queryByText(/using fallback room\. server unavailable\./i)).not.toBeInTheDocument()
     );
@@ -1018,8 +1130,8 @@ describe("app shell", () => {
       })
     });
 
-    expect(await screen.findByText(/no private chats yet\./i)).toBeInTheDocument();
-    expect(screen.getByText(/direct messages and group dms/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no beacon or private chats yet\./i)).toBeInTheDocument();
+    expect(screen.getByText(/beacon rooms and dms land here\./i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /view profile/i })).not.toBeInTheDocument();
   });
 
@@ -1066,8 +1178,8 @@ describe("app shell", () => {
     await waitFor(() => expect(screen.queryByText(/no live tiles yet\./i)).not.toBeInTheDocument());
 
     renderRouter("/app/chats");
-    expect(await screen.findByText(/no private chats yet\./i)).toBeInTheDocument();
-    expect(await screen.findByText(/dms and group dms land here\./i)).toBeInTheDocument();
+    expect(await screen.findByText(/no beacon or private chats yet\./i)).toBeInTheDocument();
+    expect(await screen.findByText(/beacon rooms and dms land here\./i)).toBeInTheDocument();
 
     renderRouter("/app/pulse");
     expect(await screen.findByText(/no feed activity yet\./i)).toBeInTheDocument();
@@ -1090,9 +1202,12 @@ describe("app shell", () => {
 
     renderRouter("/app/settings");
 
+    expect(screen.getByRole("button", { name: /toggle appearance section/i })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: /toggle keys section/i })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: /toggle relays section/i })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: /toggle admin section/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("radio", { name: /dark/i })).toBeChecked();
+    expect(screen.getByText(/dark applied/i)).toBeInTheDocument();
     expect((await screen.findAllByText(/synchrono city local/i)).length).toBeGreaterThan(0);
     expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
     expect(screen.getByText(/connect or switch to the relay operator pubkey to unlock admin controls and review relay health/i)).toBeInTheDocument();
@@ -1222,6 +1337,73 @@ describe("app shell", () => {
 
     expect(await screen.findByRole("heading", { name: /2 relays configured/i })).toBeInTheDocument();
     expect(screen.getByText("wss://mission.example/relay")).toBeInTheDocument();
+  });
+
+  it("switches appearance modes and persists the selection", async () => {
+    mockFetchWithBootstrap((url) => {
+      if (url.pathname === "/healthz") {
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Synchrono City Local",
+          relay_url: "ws://localhost:8080",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-18T18:30:00Z"
+        });
+      }
+
+      return undefined;
+    });
+
+    const { user } = renderRouter("/app/settings");
+
+    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(window.localStorage.getItem(appearanceStorageKey)).toBe("dark");
+
+    await user.click(screen.getByRole("radio", { name: /light/i }));
+
+    await waitFor(() => {
+      expect(document.documentElement).toHaveAttribute("data-theme", "light");
+      expect(document.documentElement).toHaveAttribute("data-theme-mode", "light");
+    });
+    expect(window.localStorage.getItem(appearanceStorageKey)).toBe("light");
+
+    await user.click(screen.getByRole("radio", { name: /system/i }));
+
+    await waitFor(() => {
+      expect(document.documentElement).toHaveAttribute("data-theme-mode", "system");
+    });
+    expect(window.localStorage.getItem(appearanceStorageKey)).toBe("system");
+  });
+
+  it("loads system appearance from storage and follows device theme changes", async () => {
+    const colorScheme = mockColorSchemePreference(false);
+    window.localStorage.setItem(appearanceStorageKey, "system");
+
+    mockFetchWithBootstrap((url) => {
+      if (url.pathname === "/healthz") {
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Synchrono City Local",
+          relay_url: "ws://localhost:8080",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-18T18:30:00Z"
+        });
+      }
+
+      return undefined;
+    });
+
+    renderRouter("/app/settings");
+
+    expect(await screen.findByRole("radio", { name: /system/i })).toBeChecked();
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "light"));
+    expect(screen.getByText(/system mode is currently applying light/i)).toBeInTheDocument();
+
+    colorScheme.setMatches(true);
+
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "dark"));
+    expect(screen.getByText(/system mode is currently applying dark/i)).toBeInTheDocument();
   });
 
   it("toggles settings sections independently for the operator session", async () => {
@@ -1886,6 +2068,7 @@ describe("app shell", () => {
     const governanceToggle = screen.getByRole("button", { name: /toggle admin section/i });
     if (governanceToggle.getAttribute("aria-expanded") !== "true") {
       await user.click(governanceToggle);
+      await waitFor(() => expect(governanceToggle).toHaveAttribute("aria-expanded", "true"));
     }
     await user.click(screen.getByRole("button", { name: /connect signer/i }));
 
@@ -1985,6 +2168,7 @@ describe("app shell", () => {
     const deniedAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
     if (deniedAdminToggle.getAttribute("aria-expanded") !== "true") {
       await userEvent.click(deniedAdminToggle);
+      await waitFor(() => expect(deniedAdminToggle).toHaveAttribute("aria-expanded", "true"));
     }
     await userEvent.click(screen.getByRole("button", { name: /connect signer/i }));
 
@@ -2016,6 +2200,7 @@ describe("app shell", () => {
     const validationAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
     if (validationAdminToggle.getAttribute("aria-expanded") !== "true") {
       await user.click(validationAdminToggle);
+      await waitFor(() => expect(validationAdminToggle).toHaveAttribute("aria-expanded", "true"));
     }
     await user.click(screen.getByRole("button", { name: /connect signer/i }));
     await screen.findByText(/browser signer verified/i);
@@ -2052,6 +2237,7 @@ describe("app shell", () => {
     const failureAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
     if (failureAdminToggle.getAttribute("aria-expanded") !== "true") {
       await userEvent.click(failureAdminToggle);
+      await waitFor(() => expect(failureAdminToggle).toHaveAttribute("aria-expanded", "true"));
     }
     await userEvent.click(screen.getByRole("button", { name: /connect signer/i }));
 

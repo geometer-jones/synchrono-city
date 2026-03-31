@@ -25,7 +25,12 @@ services:
 
   livekit:
     image: livekit/livekit-server:latest
-    command: ["--config", "/etc/livekit/livekit.yaml"]
+    env_file:
+      - .env.docker
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - 'exec /livekit-server --config /etc/livekit/livekit.yaml --keys "$$LIVEKIT_API_KEY: $$LIVEKIT_API_SECRET"'
     depends_on:
       redis:
         condition: service_started
@@ -108,7 +113,8 @@ services:
         VITE_NOSTR_RELAY_URL: ${VITE_NOSTR_RELAY_URL:-ws://localhost:8080}
         VITE_BLOSSOM_URL: ${VITE_BLOSSOM_URL:-http://localhost:3001}
         VITE_MAPBOX_ACCESS_TOKEN: ${VITE_MAPBOX_ACCESS_TOKEN:-}
-        VITE_MAPBOX_STYLE_URL: ${VITE_MAPBOX_STYLE_URL:-mapbox://styles/mapbox/dark-v11}
+        VITE_MAPBOX_DARK_STYLE_URL: ${VITE_MAPBOX_DARK_STYLE_URL:-mapbox://styles/mapbox/dark-v11}
+        VITE_MAPBOX_LIGHT_STYLE_URL: ${VITE_MAPBOX_LIGHT_STYLE_URL:-mapbox://styles/mapbox/streets-v12}
     depends_on:
       concierge:
         condition: service_healthy

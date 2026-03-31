@@ -2,6 +2,7 @@ import type {
   CrossRelayFeedItem,
   FeedSegment,
   GeoNote,
+  GeoNoteReaction,
   ParticipantProfile,
   Place,
   RelayListEntry
@@ -40,6 +41,28 @@ function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+function asReactionArray(value: unknown): GeoNoteReaction[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const reactions = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+
+    const emoji = asString((entry as Record<string, unknown>).emoji).trim();
+    const count = asNumber((entry as Record<string, unknown>).count);
+    if (!emoji || count <= 0) {
+      return [];
+    }
+
+    return [{ emoji, count }];
+  });
+
+  return reactions.length > 0 ? reactions : undefined;
+}
+
 function asBoolean(value: unknown) {
   return value === true;
 }
@@ -63,15 +86,26 @@ function pickValue(record: unknown, ...keys: string[]) {
 }
 
 export function normalizePlacePayload(place: Place): Place {
+  const ownerPubkey = asString(pickValue(place, "ownerPubkey", "owner_pubkey"));
+
   return {
     geohash: asString(pickValue(place, "geohash")),
     title: asString(pickValue(place, "title")),
     neighborhood: asString(pickValue(place, "neighborhood")),
     description: asString(pickValue(place, "description")),
     activitySummary: asString(pickValue(place, "activitySummary", "activity_summary")),
+    createdAt: (() => {
+      const value = pickValue(place, "createdAt", "created_at");
+      return value ? asString(value) : undefined;
+    })(),
     picture: (() => {
       const value = pickValue(place, "picture", "pic");
       return value ? asString(value) : undefined;
+    })(),
+    ownerPubkey: ownerPubkey || undefined,
+    memberPubkeys: (() => {
+      const value = asStringArray(pickValue(place, "memberPubkeys", "member_pubkeys"));
+      return value.length > 0 ? value : undefined;
     })(),
     tags: asStringArray(pickValue(place, "tags")),
     capacity: asNumber(pickValue(place, "capacity")),
@@ -115,7 +149,20 @@ export function normalizeGeoNotePayload(note: GeoNote): GeoNote {
     authorPubkey: asString(pickValue(note, "authorPubkey", "author_pubkey")),
     content: asString(pickValue(note, "content")),
     createdAt: asString(pickValue(note, "createdAt", "created_at")),
-    replies: asNumber(pickValue(note, "replies"))
+    replies: asNumber(pickValue(note, "replies")),
+    replyTargetId: (() => {
+      const value = pickValue(note, "replyTargetId", "reply_target_id");
+      return value ? asString(value) : undefined;
+    })(),
+    rootNoteId: (() => {
+      const value = pickValue(note, "rootNoteId", "root_note_id");
+      return value ? asString(value) : undefined;
+    })(),
+    taggedPubkeys: (() => {
+      const value = asStringArray(pickValue(note, "taggedPubkeys", "tagged_pubkeys"));
+      return value.length > 0 ? value : undefined;
+    })(),
+    reactions: asReactionArray(pickValue(note, "reactions"))
   };
 }
 

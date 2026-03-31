@@ -1,4 +1,4 @@
-import { ApiError, resolveApiURL } from "./api";
+import { ApiError, formatApiErrorMessage, resolveApiAuthURL, resolveApiURL } from "./api";
 
 const kindHTTPAuth = 27235;
 const hexPubkeyPattern = /^[a-f0-9]{64}$/i;
@@ -635,8 +635,9 @@ async function adminFetch<T>(
   }
 ): Promise<T> {
   const url = resolveApiURL(path);
+  const authorizationURL = resolveApiAuthURL(path);
   const bodyText = init.body === undefined ? undefined : JSON.stringify(init.body);
-  const authorization = await createAuthorizationHeader(url.toString(), init.method, bodyText);
+  const authorization = await createAuthorizationHeader(authorizationURL.toString(), init.method, bodyText);
 
   const headers = new Headers({
     Authorization: authorization
@@ -654,11 +655,7 @@ async function adminFetch<T>(
   const text = await response.text();
   const data = text ? (JSON.parse(text) as unknown) : null;
   if (!response.ok) {
-    const message =
-      typeof data === "object" && data !== null && "message" in data
-        ? String((data as { message: unknown }).message)
-        : `Request failed with status ${response.status}`;
-    throw new ApiError(message, response.status, data);
+    throw new ApiError(formatApiErrorMessage(data, response.status), response.status, data);
   }
 
   return data as T;

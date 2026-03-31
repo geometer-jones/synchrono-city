@@ -125,21 +125,38 @@ func (s *Server) handleSocialBeacons(w http.ResponseWriter, r *http.Request) {
 		Picture string   `json:"pic"`
 		About   string   `json:"about"`
 		Tags    []string `json:"tags"`
+		Pubkey  string   `json:"pubkey"`
 	}
 	if err := decodeJSONBody(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
 		return
 	}
 
+	creatorPubkey := strings.TrimSpace(request.Pubkey)
+	if creatorPubkey != "" {
+		validatedPubkey, err := validatePubkey(creatorPubkey)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return
+		}
+		creatorPubkey = validatedPubkey
+	}
+
 	result, err := s.socialService.CreateOrReturnBeacon(
+		r.Context(),
 		strings.TrimSpace(request.Geohash),
 		request.Name,
 		request.Picture,
 		request.About,
 		request.Tags,
+		creatorPubkey,
 	)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+		status := http.StatusBadRequest
+		if !errors.Is(err, social.ErrInvalidGeohash) && !errors.Is(err, social.ErrEmptyBeaconName) {
+			status = http.StatusInternalServerError
+		}
+		writeJSON(w, status, map[string]string{"error": "invalid_request", "message": err.Error()})
 		return
 	}
 

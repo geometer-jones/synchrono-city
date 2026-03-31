@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
 
+import { useAppearance, type ResolvedAppearanceMode } from "../appearance";
+
 type MapTile = {
   geohash: string;
   name?: string;
@@ -20,6 +22,7 @@ type MapPreviewProps = {
   pendingGeohash?: string;
   onSelectTile?: (geohash: string) => void;
   onBackgroundSelectTile?: (geohash: string) => void;
+  onDismissPendingMarker?: () => void;
   markerCards?: Array<{
     geohash: string;
     ariaLabel?: string;
@@ -33,9 +36,10 @@ type MapInteractionTarget = {
   dispatchEvent: (event: Event) => boolean;
 };
 
-const hasMapboxConfig = Boolean(
-  import.meta.env.VITE_MAPBOX_ACCESS_TOKEN && import.meta.env.VITE_MAPBOX_STYLE_URL
-);
+const defaultDarkMapStyleUrl = "mapbox://styles/mapbox/dark-v11";
+const defaultLightMapStyleUrl = "mapbox://styles/mapbox/streets-v12";
+const legacyMapStyleUrl = import.meta.env.VITE_MAPBOX_STYLE_URL;
+const hasMapboxConfig = Boolean(import.meta.env.VITE_MAPBOX_ACCESS_TOKEN);
 const shouldLoadMapbox = hasMapboxConfig && import.meta.env.MODE !== "test";
 
 const markerPositions = [
@@ -67,6 +71,20 @@ type MarkerPlacement = {
   top: string;
 };
 
+type LngLatCoordinate = [number, number];
+
+type GlobeTransform = {
+  _center?: { lat: number; lng: number };
+  center?: { lat: number; lng: number };
+  angle?: number;
+  _pitch?: number;
+  pitch?: number;
+  cameraToCenterDistance?: number;
+  pixelsPerMeter?: number;
+};
+
+type Vector3 = [number, number, number];
+
 type StoredMapViewport = {
   bounds: {
     east: number;
@@ -79,9 +97,170 @@ type StoredMapViewport = {
 };
 
 const pairLayerStride = 3;
+const earthRadiusMeters = 6_371_008.8;
+const globeOcclusionAngleThreshold = (Math.PI / 2) * 1.01;
 
 function isFiniteCoordinate(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRenderableProjectedCoordinate(value: unknown): value is number {
+  return isFiniteCoordinate(value) && Math.abs(value) !== Number.MAX_VALUE;
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function degreesToRadians(value: number) {
+  return value * (Math.PI / 180);
+}
+
+function addVectors(left: Vector3, right: Vector3): Vector3 {
+  return [left[0] + right[0], left[1] + right[1], left[2] + right[2]];
+}
+
+function subtractVectors(left: Vector3, right: Vector3): Vector3 {
+  return [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
+}
+
+function scaleVector(vector: Vector3, scalar: number): Vector3 {
+  return [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar];
+}
+
+function dotVectors(left: Vector3, right: Vector3) {
+  return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
+}
+
+function crossVectors(left: Vector3, right: Vector3): Vector3 {
+  return [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0]
+  ];
+}
+
+function vectorMagnitude(vector: Vector3) {
+  return Math.hypot(vector[0], vector[1], vector[2]);
+}
+
+function normalizeVector(vector: Vector3): Vector3 {
+  const magnitude = vectorMagnitude(vector);
+  if (magnitude === 0) {
+    return [0, 0, 0];
+  }
+
+  return scaleVector(vector, 1 / magnitude);
+}
+
+function angleBetweenVectors(left: Vector3, right: Vector3) {
+  const leftMagnitude = vectorMagnitude(left);
+  const rightMagnitude = vectorMagnitude(right);
+  if (leftMagnitude === 0 || rightMagnitude === 0) {
+    return 0;
+  }
+
+  return Math.acos(clamp(dotVectors(left, right) / (leftMagnitude * rightMagnitude), -1, 1));
+}
+
+function rotateVectorAroundAxis(vector: Vector3, axis: Vector3, angle: number): Vector3 {
+  const normalizedAxis = normalizeVector(axis);
+  if (vectorMagnitude(normalizedAxis) === 0 || angle === 0) {
+    return [...vector];
+  }
+
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const axisCrossVector = crossVectors(normalizedAxis, vector);
+  const axisDotVector = dotVectors(normalizedAxis, vector);
+
+  return [
+    vector[0] * cosine + axisCrossVector[0] * sine + normalizedAxis[0] * axisDotVector * (1 - cosine),
+    vector[1] * cosine + axisCrossVector[1] * sine + normalizedAxis[1] * axisDotVector * (1 - cosine),
+    vector[2] * cosine + axisCrossVector[2] * sine + normalizedAxis[2] * axisDotVector * (1 - cosine)
+  ];
+}
+
+function latLngToEarthCentered([longitude, latitude]: LngLatCoordinate, radius = earthRadiusMeters): Vector3 {
+  const latitudeRadians = degreesToRadians(latitude);
+  const longitudeRadians = degreesToRadians(longitude);
+  const cosineLatitude = Math.cos(latitudeRadians);
+
+  return [
+    cosineLatitude * Math.sin(longitudeRadians) * radius,
+    -Math.sin(latitudeRadians) * radius,
+    cosineLatitude * Math.cos(longitudeRadians) * radius
+  ];
+}
+
+function resolveTransformCenter(transform: GlobeTransform): LngLatCoordinate | null {
+  const center = transform._center ?? transform.center;
+  if (!center || !isFiniteCoordinate(center.lng) || !isFiniteCoordinate(center.lat)) {
+    return null;
+  }
+
+  return [center.lng, center.lat];
+}
+
+function resolveGlobeCameraPosition(transform: GlobeTransform): Vector3 | null {
+  const center = resolveTransformCenter(transform);
+  if (!center) {
+    return null;
+  }
+
+  if (
+    !isFiniteCoordinate(transform.cameraToCenterDistance) ||
+    !isFiniteCoordinate(transform.pixelsPerMeter) ||
+    transform.pixelsPerMeter === 0
+  ) {
+    return null;
+  }
+
+  const centerToPivot = latLngToEarthCentered(center);
+  const rotatedPitchAxis = rotateVectorAroundAxis(
+    crossVectors([0, 1, 0], centerToPivot),
+    centerToPivot,
+    -(transform.angle ?? 0)
+  );
+  const pivotToCamera = rotateVectorAroundAxis(
+    scaleVector(normalizeVector(centerToPivot), transform.cameraToCenterDistance / transform.pixelsPerMeter),
+    rotatedPitchAxis,
+    -(transform._pitch ?? transform.pitch ?? 0)
+  );
+
+  return addVectors(centerToPivot, pivotToCamera);
+}
+
+function isLngLatBehindGlobe(map: MapboxMap, lngLat: LngLatCoordinate) {
+  const transform = (map as MapboxMap & { transform?: GlobeTransform }).transform;
+  if (!transform) {
+    return false;
+  }
+
+  const centerToPoint = latLngToEarthCentered(lngLat);
+  const cameraPosition = resolveGlobeCameraPosition(transform);
+  if (!cameraPosition) {
+    return false;
+  }
+
+  const pointToCamera = subtractVectors(cameraPosition, centerToPoint);
+  return angleBetweenVectors(pointToCamera, centerToPoint) > globeOcclusionAngleThreshold;
+}
+
+function resolveProjectedPlacement(map: MapboxMap, lngLat: LngLatCoordinate): MarkerPlacement | null {
+  if (map._showingGlobe() && isLngLatBehindGlobe(map, lngLat)) {
+    return null;
+  }
+
+  const point = map.project(lngLat);
+  if (!isRenderableProjectedCoordinate(point.x) || !isRenderableProjectedCoordinate(point.y)) {
+    return null;
+  }
+
+  return {
+    left: `${point.x}px`,
+    top: `${point.y}px`
+  };
 }
 
 function loadStoredMapViewport(): StoredMapViewport | null {
@@ -356,6 +535,14 @@ function arePairLayersEqual(left: Record<string, number>, right: Record<string, 
   return leftKeys.every((key) => left[key] === right[key]);
 }
 
+function resolveMapStyleUrl(resolvedAppearanceMode: ResolvedAppearanceMode) {
+  if (resolvedAppearanceMode === "light") {
+    return import.meta.env.VITE_MAPBOX_LIGHT_STYLE_URL || legacyMapStyleUrl || defaultLightMapStyleUrl;
+  }
+
+  return import.meta.env.VITE_MAPBOX_DARK_STYLE_URL || legacyMapStyleUrl || defaultDarkMapStyleUrl;
+}
+
 export function MapPreview({
   tiles,
   selectedGeohash,
@@ -364,9 +551,11 @@ export function MapPreview({
   pendingGeohash,
   onSelectTile,
   onBackgroundSelectTile,
+  onDismissPendingMarker,
   markerCards,
   children
 }: PropsWithChildren<MapPreviewProps>) {
+  const { resolvedAppearanceMode } = useAppearance();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapboxMap | null>(null);
   const mapboxRef = useRef<MapboxModule["default"] | null>(null);
@@ -397,6 +586,7 @@ export function MapPreview({
     () => buildFeatureCollection(tiles, selectedGeohash, activeGeohash),
     [tiles, selectedGeohash, activeGeohash]
   );
+  const mapStyleUrl = resolveMapStyleUrl(resolvedAppearanceMode);
   const featureCollectionRef = useRef(featureCollection);
   const selectedViewportFocusSignatureRef = useRef<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -495,7 +685,7 @@ export function MapPreview({
 
         const map = new mapboxgl.Map({
           container: containerRef.current,
-          style: import.meta.env.VITE_MAPBOX_STYLE_URL,
+          style: mapStyleUrl,
           center: storedViewport?.center ?? defaultMapCenter,
           zoom: storedViewport?.zoom ?? defaultMapZoom,
           attributionControl: false
@@ -523,11 +713,12 @@ export function MapPreview({
               continue;
             }
 
-            const point = map.project(center as [number, number]);
-            nextPlacements[tile.geohash] = {
-              left: `${point.x}px`,
-              top: `${point.y}px`
-            };
+            const placement = resolveProjectedPlacement(map, center);
+            if (!placement) {
+              continue;
+            }
+
+            nextPlacements[tile.geohash] = placement;
           }
 
           setMarkerPlacements(nextPlacements);
@@ -547,11 +738,12 @@ export function MapPreview({
               continue;
             }
 
-            const point = map.project(center as [number, number]);
-            nextPlacements[card.geohash] = {
-              left: `${point.x}px`,
-              top: `${point.y}px`
-            };
+            const placement = resolveProjectedPlacement(map, center);
+            if (!placement) {
+              continue;
+            }
+
+            nextPlacements[card.geohash] = placement;
           }
 
           setMarkerCardPlacements(nextPlacements);
@@ -570,11 +762,7 @@ export function MapPreview({
             return;
           }
 
-          const point = map.project(center as [number, number]);
-          setPendingPlacement({
-            left: `${point.x}px`,
-            top: `${point.y}px`
-          });
+          setPendingPlacement(resolveProjectedPlacement(map, center));
         };
 
         updateMarkerPlacementsRef.current = updateMarkerPlacements;
@@ -645,6 +833,9 @@ export function MapPreview({
       cancelled = true;
       window.cancelAnimationFrame(resizeFrame);
       resizeObserver?.disconnect();
+      if (mapRef.current) {
+        saveMapViewport(mapRef.current);
+      }
       mapLoadedRef.current = false;
       selectedViewportFocusSignatureRef.current = null;
       setMapReady(false);
@@ -659,7 +850,7 @@ export function MapPreview({
       setMarkerCardPlacements({});
       setPendingPlacement(null);
     };
-  }, []);
+  }, [mapStyleUrl]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -814,6 +1005,21 @@ export function MapPreview({
     }
   }
 
+  function handlePendingMarkerPointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handlePendingMarkerClick(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    onDismissPendingMarker?.();
+  }
+
   return (
     <section className="world-map" aria-label="World map">
       <div className="map-surface world-map-surface">
@@ -900,17 +1106,20 @@ export function MapPreview({
           </div>
         ) : null}
         {pendingPlacement ? (
-          <div
+          <button
             className="map-pending-pin"
+            type="button"
             style={{
               left: pendingPlacement.left,
               top: pendingPlacement.top
             }}
-            aria-hidden="true"
+            aria-label="Remove pending beacon marker"
+            onClick={handlePendingMarkerClick}
+            onPointerDown={handlePendingMarkerPointerDown}
           >
             <span className="map-pending-pin-ring" />
             <span className="map-pending-pin-core" />
-          </div>
+          </button>
         ) : null}
         {children ? <div className="world-map-layer">{children}</div> : null}
         {mapError ? <p className="map-overlay map-error">{mapError}</p> : null}

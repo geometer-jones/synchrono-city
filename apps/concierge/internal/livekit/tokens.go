@@ -8,6 +8,7 @@ import (
 	livekitauth "github.com/livekit/protocol/auth"
 
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/config"
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/pubkeys"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
@@ -97,11 +98,15 @@ func (s *TokenService) Issue(ctx context.Context, pubkey, roomID string) (TokenR
 }
 
 func (s *TokenService) roomGrants(ctx context.Context, pubkey, roomID string) (bool, bool, error) {
-	if pubkey == s.operatorPubkey {
+	if pubkeys.Equal(pubkey, s.operatorPubkey) {
 		return true, true, nil
 	}
 
-	permission, err := s.store.LatestRoomPermission(ctx, pubkey, roomID)
+	if s.hasPrivilegedRoomAccess(ctx, pubkey) {
+		return true, true, nil
+	}
+
+	permission, err := s.latestRoomPermission(ctx, pubkey, roomID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) && s.defaultRoomGrantSource != nil {
 			canPublish, canSubscribe, ok := s.defaultRoomGrantSource.DefaultRoomGrants(roomID)
@@ -113,6 +118,78 @@ func (s *TokenService) roomGrants(ctx context.Context, pubkey, roomID string) (b
 	}
 
 	return permission.CanPublish, permission.CanSubscribe, nil
+}
+
+func (s *TokenService) hasPrivilegedRoomAccess(ctx context.Context, pubkey string) bool {
+	for _, scope := range []string{"media", store.DefaultScopeValue, "relay.admin"} {
+		record, err := s.latestStandingRecord(ctx, pubkey, scope)
+		if err != nil {
+			continue
+		}
+		if record.Standing == "owner" || record.Standing == "moderator" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *TokenService) latestStandingRecord(
+	ctx context.Context,
+	pubkey, scope string,
+) (store.StandingRecord, error) {
+	var latest store.StandingRecord
+	found := false
+
+	for _, alias := range pubkeys.Aliases(pubkey) {
+		record, err := s.store.LatestStanding(ctx, alias, scope)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return store.StandingRecord{}, err
+		}
+
+		if !found || record.CreatedAt.After(latest.CreatedAt) {
+			latest = record
+			found = true
+		}
+	}
+
+	if !found {
+		return store.StandingRecord{}, store.ErrNotFound
+	}
+
+	return latest, nil
+}
+
+func (s *TokenService) latestRoomPermission(
+	ctx context.Context,
+	pubkey, roomID string,
+) (store.RoomPermission, error) {
+	var latest store.RoomPermission
+	found := false
+
+	for _, alias := range pubkeys.Aliases(pubkey) {
+		record, err := s.store.LatestRoomPermission(ctx, alias, roomID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return store.RoomPermission{}, err
+		}
+
+		if !found || record.CreatedAt.After(latest.CreatedAt) {
+			latest = record
+			found = true
+		}
+	}
+
+	if !found {
+		return store.RoomPermission{}, store.ErrNotFound
+	}
+
+	return latest, nil
 }
 
 func boolPtr(value bool) *bool {

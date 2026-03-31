@@ -33,4 +33,30 @@ describe("apiFetch", () => {
 
     await expect(apiFetch<string>("/healthz")).resolves.toBe("ok");
   });
+
+  it("surfaces structured policy deny reasons instead of a generic status code", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          decision: "deny",
+          reason: "not_allowlisted",
+          scope: "media.join",
+          proof_requirement_met: false
+        }),
+        {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        }
+      )
+    );
+
+    await expect(apiFetch("/api/v1/token", { method: "POST", body: "{}" })).rejects.toMatchObject({
+      name: "ApiError",
+      message: "This room requires guest-list access.",
+      status: 403,
+      data: expect.objectContaining({
+        reason: "not_allowlisted"
+      })
+    });
+  });
 });

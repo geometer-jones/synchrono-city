@@ -1,4 +1,4 @@
-import { ApiError, resolveApiURL } from "./api";
+import { ApiError, formatApiErrorMessage, resolveApiAuthURL, resolveApiURL } from "./api";
 import { signEventWithPrivateKey } from "./nostr";
 
 const kindHTTPAuth = 27235;
@@ -50,14 +50,18 @@ export function hasNostrSigner() {
   return typeof window !== "undefined" && Boolean(window.nostr);
 }
 
-export async function requestLiveKitToken(roomID: string): Promise<LiveKitTokenResponse> {
+export async function requestLiveKitToken(
+  roomID: string,
+  signingOptions?: MediaSigningOptions
+): Promise<LiveKitTokenResponse> {
   const url = resolveApiURL("/api/v1/token");
+  const authorizationURL = resolveApiAuthURL("/api/v1/token");
   const bodyText = JSON.stringify({ room_id: roomID.trim() });
 
   return fetchJSON<LiveKitTokenResponse>(url, {
     method: "POST",
     headers: {
-      Authorization: await createAuthorizationHeader(url.toString(), "POST", bodyText)
+      Authorization: await createAuthorizationHeader(authorizationURL.toString(), "POST", bodyText, signingOptions)
     },
     body: bodyText
   });
@@ -138,15 +142,7 @@ function parseResponseBody(text: string): unknown {
 }
 
 function formatResponseErrorMessage(data: unknown, status: number) {
-  if (typeof data === "string" && data.length > 0) {
-    return data;
-  }
-
-  if (typeof data === "object" && data !== null && "message" in data) {
-    return String((data as { message: unknown }).message);
-  }
-
-  return `Request failed with status ${status}`;
+  return formatApiErrorMessage(data, status);
 }
 
 async function createAuthorizationHeader(

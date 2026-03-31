@@ -1,7 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CallSession } from "../data";
 
@@ -112,6 +113,37 @@ function renderOverlay() {
   );
 }
 
+function renderOverlayHarness() {
+  return render(
+    <MemoryRouter initialEntries={["/app/chats"]}>
+      <Routes>
+        <Route
+          path="/app/*"
+          element={
+            <>
+              <OverlayHarness />
+              <LocationProbe />
+            </>
+          }
+        />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function OverlayHarness() {
+  const [, setTick] = useState(0);
+
+  return (
+    <>
+      <button type="button" onClick={() => setTick((value) => value + 1)}>
+        Rerender overlay
+      </button>
+      <CallOverlay />
+    </>
+  );
+}
+
 function LocationProbe() {
   const location = useLocation();
 
@@ -119,18 +151,65 @@ function LocationProbe() {
 }
 
 describe("CallOverlay", () => {
-  it("renders only remote participant tiles even when a participant has no camera track", () => {
+  beforeEach(() => {
+    leaveBeaconCall.mockClear();
+    toggleCallControl.mockClear();
+    attachCameraTrack.mockClear();
+    detachCameraTrack.mockClear();
+    attachScreenshareTrack.mockClear();
+    detachScreenshareTrack.mockClear();
+    mockState.activeCall = {
+      geohash: "9q8yyk",
+      roomID: "geo:npub1operator:9q8yyk",
+      placeTitle: "Civic Plaza",
+      participantPubkeys: ["npub1scout", "npub1operator"],
+      participantStates: [],
+      mediaStreams: [
+        {
+          id: "npub1scout:camera",
+          pubkey: "npub1scout",
+          source: "camera" as const,
+          isLocal: true,
+          track: {
+            attach: attachCameraTrack,
+            detach: detachCameraTrack
+          }
+        },
+        {
+          id: "npub1operator:screen_share",
+          pubkey: "npub1operator",
+          source: "screen_share" as const,
+          isLocal: false,
+          track: {
+            attach: attachScreenshareTrack,
+            detach: detachScreenshareTrack
+          }
+        }
+      ],
+      transport: "livekit" as const,
+      connectionState: "connected" as const,
+      statusMessage: "Connected",
+      identity: "npub1scout",
+      liveKitURL: "wss://livekit.example.test",
+      expiresAt: "2026-03-22T20:00:00Z",
+      canPublish: true,
+      mic: true,
+      cam: false,
+      screenshare: false,
+      deafen: false,
+      minimized: false
+    };
+  });
+
+  it("renders only screen-share tiles in the overlay media region", () => {
     renderOverlay();
 
     const streamRegion = screen.getByLabelText(/live call media streams/i);
-    const remoteCameraFallback = within(streamRegion).getByLabelText(/relay operator camera stream/i);
     const remoteScreenshare = within(streamRegion).getByLabelText(/relay operator screen share stream/i);
 
     expect(within(streamRegion).queryByLabelText(/scout vale camera stream/i)).not.toBeInTheDocument();
-    expect(remoteCameraFallback).toHaveClass("is-camera");
+    expect(within(streamRegion).queryByLabelText(/relay operator camera stream/i)).not.toBeInTheDocument();
     expect(remoteScreenshare).toHaveClass("is-screen-share");
-    expect(remoteCameraFallback).toHaveTextContent("Camera");
-    expect(remoteCameraFallback).toHaveTextContent("Relay Operator");
     expect(remoteScreenshare).toHaveTextContent("Screen share");
     expect(attachCameraTrack).not.toHaveBeenCalled();
     expect(attachScreenshareTrack).toHaveBeenCalledWith(
@@ -138,30 +217,44 @@ describe("CallOverlay", () => {
     );
   });
 
-  it("keeps the call controls in the header and hides relay token metadata", () => {
+  it("keeps the overlay header focused on the active place and hides relay token metadata", () => {
     const { container } = renderOverlay();
 
     const header = container.querySelector(".call-overlay-header");
     expect(header).not.toBeNull();
 
     expect(within(header as HTMLElement).queryByText("Live call")).not.toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("heading", { name: "Civic Plaza" })).toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("link", { name: "Civic Plaza" })).toHaveAttribute(
-      "href",
-      "/app?beacon=9q8yyk"
-    );
     expect(within(header as HTMLElement).getByRole("img", { name: "Civic Plaza" })).toHaveAttribute(
       "src",
       "https://example.com/civic-plaza.png"
     );
+    expect(within(header as HTMLElement).queryByRole("heading", { name: "Civic Plaza" })).not.toBeInTheDocument();
+    expect(within(header as HTMLElement).queryByRole("link", { name: "Civic Plaza" })).not.toBeInTheDocument();
     expect(within(header as HTMLElement).queryByText("9q8yyk")).not.toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Mic on" })).toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Camera off" })).toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Screenshare off" })).toBeInTheDocument();
-    expect(within(header as HTMLElement).getByRole("button", { name: "Leave call" })).toBeInTheDocument();
+    const micButton = within(header as HTMLElement).getByRole("button", { name: "Mic on" });
+    const cameraButton = within(header as HTMLElement).getByRole("button", { name: "Camera off" });
+    const screenshareButton = within(header as HTMLElement).getByRole("button", { name: "Screenshare off" });
+    const leaveButton = within(header as HTMLElement).getByRole("button", { name: "Leave call" });
 
+    expect(micButton).toBeInTheDocument();
+    expect(cameraButton).toBeInTheDocument();
+    expect(screenshareButton).toBeInTheDocument();
+    expect(leaveButton).toBeInTheDocument();
+    expect(micButton).not.toHaveAttribute("title");
+    expect(cameraButton).not.toHaveAttribute("title");
+    expect(screenshareButton).not.toHaveAttribute("title");
+    expect(leaveButton).not.toHaveAttribute("title");
+
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
     expect(screen.queryByText("wss://livekit.example.test")).not.toBeInTheDocument();
     expect(screen.queryByText("2026-03-22T20:00:00Z")).not.toBeInTheDocument();
+  });
+
+  it("does not render a separate footer control region", () => {
+    const { container } = renderOverlay();
+    const footer = container.querySelector(".call-overlay-footer");
+
+    expect(footer).toBeNull();
   });
 
   it("navigates to the focused beacon on the map when clicking the avatar", async () => {
@@ -177,7 +270,23 @@ describe("CallOverlay", () => {
     expect(screen.getByTestId("route-location").textContent).toMatch(/^\/app\?beacon=9q8yyk&focus=/);
   });
 
-  it("hides local preview status copy while media publish controls stay disabled", () => {
+  it("keeps attached media tracks stable across unrelated rerenders", async () => {
+    const user = userEvent.setup();
+
+    renderOverlayHarness();
+
+    expect(attachScreenshareTrack).toHaveBeenCalledTimes(1);
+    expect(detachScreenshareTrack).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /rerender overlay/i }));
+
+    expect(attachScreenshareTrack).toHaveBeenCalledTimes(1);
+    expect(detachScreenshareTrack).not.toHaveBeenCalled();
+  });
+
+  it("hides local preview status copy while media publish controls stay enabled", async () => {
+    const user = userEvent.setup();
+
     mockState.activeCall = {
       ...mockState.activeCall,
       transport: "local",
@@ -189,9 +298,21 @@ describe("CallOverlay", () => {
     renderOverlay();
 
     expect(screen.queryByText(/signer required for livekit media\. room intent stays local\./i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Mic on" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Camera off" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Screenshare off" })).toBeDisabled();
+    const micButton = screen.getByRole("button", { name: "Mic on" });
+    const cameraButton = screen.getByRole("button", { name: "Camera off" });
+    const screenshareButton = screen.getByRole("button", { name: "Screenshare off" });
+
+    expect(micButton).toBeEnabled();
+    expect(cameraButton).toBeEnabled();
+    expect(screenshareButton).toBeEnabled();
+
+    await user.click(micButton);
+    await user.click(cameraButton);
+    await user.click(screenshareButton);
+
+    expect(toggleCallControl).toHaveBeenNthCalledWith(1, "mic");
+    expect(toggleCallControl).toHaveBeenNthCalledWith(2, "cam");
+    expect(toggleCallControl).toHaveBeenNthCalledWith(3, "screenshare");
 
     mockState.activeCall = {
       ...mockState.activeCall,

@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/pubkeys"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
 )
 
@@ -46,7 +47,7 @@ func (s *Service) SetDefaultRoomGrantSource(source interface {
 }
 
 func (s *Service) CheckAdminAccess(ctx context.Context, subjectPubkey string) Decision {
-	if subjectPubkey == s.operatorPubkey {
+	if pubkeys.Equal(subjectPubkey, s.operatorPubkey) {
 		return Decision{Decision: "allow", Reason: "bootstrap_operator", Standing: "owner", Scope: "relay.admin", ProofRequirementMet: true}
 	}
 
@@ -64,7 +65,7 @@ func (s *Service) Evaluate(ctx context.Context, subjectPubkey, capability, roomI
 		return Decision{Decision: "deny", Reason: "missing_capability", Standing: "unknown", Scope: ""}
 	}
 
-	if subjectPubkey == s.operatorPubkey {
+	if pubkeys.Equal(subjectPubkey, s.operatorPubkey) {
 		return Decision{
 			Decision:            "allow",
 			Reason:              "bootstrap_operator",
@@ -85,7 +86,11 @@ func (s *Service) Evaluate(ctx context.Context, subjectPubkey, capability, roomI
 		}
 	}
 
-	assignments, err := s.store.ActivePolicyAssignments(ctx, subjectPubkey, capabilityScope(capability))
+	if capability == "media.join" || capability == "media.publish" {
+		standing = s.lookupPrivilegedMediaStanding(ctx, subjectPubkey, standing)
+	}
+
+	assignments, err := s.activePolicyAssignments(ctx, subjectPubkey, capabilityScope(capability))
 	if err != nil {
 		log.Printf("policy lookup failed for pubkey=%s capability=%s: %v", subjectPubkey, capability, err)
 		return Decision{
@@ -131,7 +136,18 @@ func (s *Service) Evaluate(ctx context.Context, subjectPubkey, capability, roomI
 	}
 
 	if capability == "media.join" || capability == "media.publish" {
-		permission, err := s.store.LatestRoomPermission(ctx, subjectPubkey, roomID)
+		if isPrivilegedStanding(standing) {
+			baseDecision = Decision{
+				Decision:            "allow",
+				Reason:              "local_standing",
+				Standing:            standing,
+				Scope:               capability,
+				ProofRequirementMet: true,
+			}
+			return s.applyGatePolicy(ctx, subjectPubkey, capability, standing, assignments, baseDecision)
+		}
+
+		permission, err := s.latestRoomPermission(ctx, subjectPubkey, roomID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				if capability == "media.join" && s.defaultRoomGrantSource != nil {
@@ -196,8 +212,23 @@ func (s *Service) Evaluate(ctx context.Context, subjectPubkey, capability, roomI
 	return s.applyGatePolicy(ctx, subjectPubkey, capability, standing, assignments, baseDecision)
 }
 
+func (s *Service) lookupPrivilegedMediaStanding(ctx context.Context, subjectPubkey, fallback string) string {
+	if isPrivilegedStanding(fallback) {
+		return fallback
+	}
+
+	for _, scope := range []string{store.DefaultScopeValue, "relay.admin"} {
+		standing := s.lookupStanding(ctx, subjectPubkey, scope)
+		if isPrivilegedStanding(standing) {
+			return standing
+		}
+	}
+
+	return fallback
+}
+
 func (s *Service) lookupStanding(ctx context.Context, subjectPubkey, scope string) string {
-	record, err := s.store.LatestStanding(ctx, subjectPubkey, scope)
+	record, err := s.latestStandingRecord(ctx, subjectPubkey, scope)
 	if err != nil {
 		return "guest"
 	}
@@ -228,6 +259,100 @@ func deniedByStanding(standing, capability string) bool {
 	default:
 		return false
 	}
+}
+
+func isPrivilegedStanding(standing string) bool {
+	return standing == "owner" || standing == "moderator"
+}
+
+func (s *Service) latestStandingRecord(
+	ctx context.Context,
+	subjectPubkey, scope string,
+) (store.StandingRecord, error) {
+	var latest store.StandingRecord
+	found := false
+
+	for _, alias := range pubkeys.Aliases(subjectPubkey) {
+		record, err := s.store.LatestStanding(ctx, alias, scope)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return store.StandingRecord{}, err
+		}
+
+		if !found || record.CreatedAt.After(latest.CreatedAt) {
+			latest = record
+			found = true
+		}
+	}
+
+	if !found {
+		return store.StandingRecord{}, store.ErrNotFound
+	}
+
+	return latest, nil
+}
+
+func (s *Service) latestRoomPermission(
+	ctx context.Context,
+	subjectPubkey, roomID string,
+) (store.RoomPermission, error) {
+	var latest store.RoomPermission
+	found := false
+
+	for _, alias := range pubkeys.Aliases(subjectPubkey) {
+		record, err := s.store.LatestRoomPermission(ctx, alias, roomID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return store.RoomPermission{}, err
+		}
+
+		if !found || record.CreatedAt.After(latest.CreatedAt) {
+			latest = record
+			found = true
+		}
+	}
+
+	if !found {
+		return store.RoomPermission{}, store.ErrNotFound
+	}
+
+	return latest, nil
+}
+
+func (s *Service) activePolicyAssignments(
+	ctx context.Context,
+	subjectPubkey, scope string,
+) ([]store.PolicyAssignment, error) {
+	assignments := []store.PolicyAssignment{}
+
+	for _, alias := range pubkeys.Aliases(subjectPubkey) {
+		records, err := s.store.ActivePolicyAssignments(ctx, alias, scope)
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, records...)
+	}
+
+	return assignments, nil
+}
+
+func (s *Service) hasProofVerification(
+	ctx context.Context,
+	subjectPubkey, proofType string,
+) (bool, error) {
+	for _, alias := range pubkeys.Aliases(subjectPubkey) {
+		if _, err := s.store.LatestProofVerification(ctx, alias, proofType); err == nil {
+			return true, nil
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+
+	return false, nil
 }
 
 func (s *Service) applyGatePolicy(
@@ -276,9 +401,9 @@ func (s *Service) applyGatePolicy(
 	firstMissingProof := ""
 	for _, proofType := range gatePolicy.ProofTypes {
 		status := "missing"
-		if _, err := s.store.LatestProofVerification(ctx, subjectPubkey, proofType); err == nil {
+		if verified, err := s.hasProofVerification(ctx, subjectPubkey, proofType); err == nil && verified {
 			status = "verified"
-		} else if !errors.Is(err, store.ErrNotFound) {
+		} else if err != nil {
 			return Decision{
 				Decision:            "deny",
 				Reason:              "proof_lookup_failed",

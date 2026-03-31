@@ -114,7 +114,7 @@ describe("AppShell", () => {
       </MemoryRouter>
     );
 
-    const veryNarrowRule = findMediaRule("(max-width: 480px)");
+    const veryNarrowRule = findMediaRule("(max-width: 500px)");
 
     expect(veryNarrowRule).not.toBeNull();
 
@@ -127,6 +127,28 @@ describe("AppShell", () => {
     expect(mobileNavRule?.style.getPropertyValue("padding")).toBe("8px");
     expect(mobileNavLinkRule?.style.getPropertyValue("padding")).toBe("8px 6px");
     expect(mobileNavLinkRule?.style.getPropertyValue("font-size")).toBe("0.84rem");
+  });
+
+  it("keeps the desktop tabs in the right app-bar slot", () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="/app" element={<AppShell />}>
+            <Route index element={<div data-testid="route-content">world</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    const appBar = container.querySelector(".app-bar");
+    const brand = container.querySelector(".app-bar-brand");
+    const desktopNav = container.querySelector(".app-nav-desktop");
+
+    expect(appBar).not.toBeNull();
+    expect(brand).not.toBeNull();
+    expect(desktopNav).not.toBeNull();
+    expect(appBar?.firstElementChild).toBe(brand);
+    expect(appBar?.lastElementChild).toBe(desktopNav);
   });
 
   it("preserves the selected beacon when switching tabs", async () => {

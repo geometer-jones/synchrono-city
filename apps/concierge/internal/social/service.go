@@ -269,7 +269,15 @@ func (s *Service) ResolveCallIntent(geohash, pubkey string) (CallIntent, error) 
 	}, nil
 }
 
-func (s *Service) CreateOrReturnBeacon(geohash, name, picture, about string, tags []string) (CreateOrReturnBeaconResult, error) {
+func (s *Service) CreateOrReturnBeacon(
+	ctx context.Context,
+	geohash,
+	name,
+	picture,
+	about string,
+	tags []string,
+	creatorPubkey string,
+) (CreateOrReturnBeaconResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -292,6 +300,7 @@ func (s *Service) CreateOrReturnBeacon(geohash, name, picture, about string, tag
 
 	picture = strings.TrimSpace(picture)
 	about = strings.TrimSpace(about)
+	creatorPubkey = strings.TrimSpace(creatorPubkey)
 
 	beacon := Place{
 		Geohash:         geohash,
@@ -304,6 +313,19 @@ func (s *Service) CreateOrReturnBeacon(geohash, name, picture, about string, tag
 		Capacity:        8,
 		OccupantPubkeys: []string{},
 		Unread:          false,
+	}
+
+	if s.store != nil && creatorPubkey != "" {
+		if _, err := s.store.CreateRoomPermission(ctx, store.RoomPermission{
+			SubjectPubkey:   creatorPubkey,
+			RoomID:          ResolveRoomID(s.operatorPubkey, geohash),
+			CanJoin:         true,
+			CanPublish:      true,
+			CanSubscribe:    true,
+			GrantedByPubkey: creatorPubkey,
+		}); err != nil {
+			return CreateOrReturnBeaconResult{}, err
+		}
 	}
 
 	s.places = append([]Place{beacon}, s.places...)
@@ -324,11 +346,11 @@ func (s *Service) DefaultRoomGrants(roomID string) (bool, bool, bool) {
 	}
 
 	place, ok := s.placeByGeohashLocked(geohash)
-	if !ok || !placeHasTag(place.Tags, cohortTag) {
-		return false, false, false
+	if ok && placeHasTag(place.Tags, cohortTag) {
+		return false, true, true
 	}
 
-	return false, true, true
+	return true, true, true
 }
 
 func (s *Service) ValidateEditorialPin(geohash, noteID string) error {

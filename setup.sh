@@ -88,10 +88,12 @@ read -p "Enter Mapbox access token (or press Enter to skip): " MAPBOX_TOKEN
 
 if [ -z "$MAPBOX_TOKEN" ]; then
     MAPBOX_TOKEN=""
-    MAPBOX_STYLE=""
+    MAPBOX_DARK_STYLE=""
+    MAPBOX_LIGHT_STYLE=""
     echo -e "${YELLOW}⚠ No Mapbox token - map will be blank. You can add one later.${NC}"
 else
-    MAPBOX_STYLE="mapbox://styles/mapbox/dark-v11"
+    MAPBOX_DARK_STYLE="mapbox://styles/mapbox/dark-v11"
+    MAPBOX_LIGHT_STYLE="mapbox://styles/mapbox/streets-v12"
     echo -e "${GREEN}✓ Mapbox token set${NC}"
 fi
 
@@ -138,7 +140,8 @@ VITE_CONCIERGE_URL=http://localhost:3000
 VITE_NOSTR_RELAY_URL=ws://localhost:8080
 VITE_BLOSSOM_URL=http://localhost:3001
 VITE_MAPBOX_ACCESS_TOKEN=${MAPBOX_TOKEN}
-VITE_MAPBOX_STYLE_URL=${MAPBOX_STYLE}
+VITE_MAPBOX_DARK_STYLE_URL=${MAPBOX_DARK_STYLE}
+VITE_MAPBOX_LIGHT_STYLE_URL=${MAPBOX_LIGHT_STYLE}
 EOF
 
 echo -e "${GREEN}✓ Created .env.docker${NC}"

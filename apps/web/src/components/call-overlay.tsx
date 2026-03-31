@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import { type CallMediaStream, type ParticipantProfile } from "../data";
 import { useAppState } from "../app-state";
@@ -11,13 +11,24 @@ type ToggleControlButtonProps = {
   icon: ReactNode;
   label: string;
   onClick: () => void;
-  title?: string;
 };
 
 type ActionControlButtonProps = {
   icon: ReactNode;
   label: string;
   onClick: () => void;
+};
+
+type ActiveCallControlsProps = {
+  className?: string;
+  includeLeaveButton?: boolean;
+};
+
+type ActiveCallMediaStreamsProps = {
+  className?: string;
+  includeLocal?: boolean;
+  includeParticipantTiles?: boolean;
+  regionLabel?: string;
 };
 
 type CallDisplayTile = {
@@ -30,26 +41,49 @@ type CallDisplayTile = {
   participantPicture?: string;
 };
 
+export function ActiveCallControls({
+  className = "call-controls",
+  includeLeaveButton = true
+}: ActiveCallControlsProps) {
+  const { activeCall, leaveBeaconCall, toggleCallControl } = useAppState();
+
+  if (!activeCall) {
+    return null;
+  }
+
+  return (
+    <div className={className}>
+      <ToggleControlButton
+        active={activeCall.mic}
+        label="Mic"
+        onClick={() => toggleCallControl("mic")}
+        icon={activeCall.mic ? <MicOnIcon /> : <MicOffIcon />}
+      />
+      <ToggleControlButton
+        active={activeCall.cam}
+        label="Camera"
+        onClick={() => toggleCallControl("cam")}
+        icon={activeCall.cam ? <CamOnIcon /> : <CamOffIcon />}
+      />
+      <ToggleControlButton
+        active={activeCall.screenshare}
+        label="Screenshare"
+        onClick={() => toggleCallControl("screenshare")}
+        icon={activeCall.screenshare ? <ShareOnIcon /> : <ShareOffIcon />}
+      />
+      {includeLeaveButton ? <ActionControlButton label="Leave call" onClick={leaveBeaconCall} icon={<LeaveCallIcon />} /> : null}
+    </div>
+  );
+}
+
 export function CallOverlay() {
-  const { activeCall, currentUser, getBeacon, getProfile, leaveBeaconCall, toggleCallControl } = useAppState();
+  const { activeCall, getBeacon } = useAppState();
   const navigate = useNavigate();
 
   if (!activeCall) {
     return null;
   }
 
-  const hideStatusMessage = activeCall.connectionState === "local_preview";
-  const mediaControlsDisabled =
-    activeCall.transport !== "livekit" ||
-    activeCall.connectionState !== "connected" ||
-    activeCall.canPublish === false;
-  const mediaControlsTitle =
-    hideStatusMessage
-      ? undefined
-      : activeCall.canPublish === false
-      ? "This room token does not allow publishing media."
-      : activeCall.statusMessage;
-  const displayTiles = buildCallDisplayTiles(activeCall, currentUser, getProfile);
   const beacon = getBeacon(activeCall.geohash);
   const beaconLabel = activeCall.placeTitle.trim() || activeCall.geohash;
 
@@ -57,60 +91,47 @@ export function CallOverlay() {
     <aside className="call-overlay" aria-label="Live call bar">
       <div className="call-overlay-header">
         <div className="call-overlay-title-row">
-          <div className="call-overlay-heading">
-            <button
-              className="beacon-avatar-button"
-              type="button"
-              aria-label={`Show ${beaconLabel} on the map`}
-              onClick={() => navigate({ pathname: "/app", search: buildBeaconMapSearch(activeCall.geohash, createBeaconMapFocusKey()) })}
-            >
-              <CallOverlayBeaconAvatar picture={beacon?.avatarUrl} label={beaconLabel} />
-            </button>
-            <h3>
-              <Link className="call-overlay-place-link" to={`/app?beacon=${encodeURIComponent(activeCall.geohash)}`}>
-                {beaconLabel}
-              </Link>
-            </h3>
-          </div>
-          <div className="call-controls call-controls-inline">
-            <ToggleControlButton
-              active={activeCall.mic}
-              disabled={mediaControlsDisabled}
-              label="Mic"
-              onClick={() => toggleCallControl("mic")}
-              icon={activeCall.mic ? <MicOnIcon /> : <MicOffIcon />}
-              title={mediaControlsTitle}
-            />
-            <ToggleControlButton
-              active={activeCall.cam}
-              disabled={mediaControlsDisabled}
-              label="Camera"
-              onClick={() => toggleCallControl("cam")}
-              icon={activeCall.cam ? <CamOnIcon /> : <CamOffIcon />}
-              title={mediaControlsTitle}
-            />
-            <ToggleControlButton
-              active={activeCall.screenshare}
-              disabled={mediaControlsDisabled}
-              label="Screenshare"
-              onClick={() => toggleCallControl("screenshare")}
-              icon={activeCall.screenshare ? <ShareOnIcon /> : <ShareOffIcon />}
-              title={mediaControlsTitle}
-            />
-            <ActionControlButton label="Leave call" onClick={leaveBeaconCall} icon={<LeaveCallIcon />} />
-          </div>
+          <button
+            className="beacon-avatar-button"
+            type="button"
+            aria-label={`Show ${beaconLabel} on the map`}
+            onClick={() => navigate({ pathname: "/app", search: buildBeaconMapSearch(activeCall.geohash, createBeaconMapFocusKey()) })}
+          >
+            <CallOverlayBeaconAvatar picture={beacon?.avatarUrl} label={beaconLabel} />
+          </button>
+          <ActiveCallControls className="call-controls call-controls-inline" />
         </div>
-        {hideStatusMessage ? null : <p className="muted">{activeCall.statusMessage}</p>}
       </div>
 
-      {displayTiles.length > 0 ? (
-        <section className="call-stream-grid" aria-label="Live call media streams">
-          {displayTiles.map((tile) => (
-            <CallStreamTile key={tile.id} tile={tile} />
-          ))}
-        </section>
-      ) : null}
+      <ActiveCallMediaStreams includeParticipantTiles={false} />
     </aside>
+  );
+}
+
+export function ActiveCallMediaStreams({
+  className = "call-stream-grid",
+  includeLocal = false,
+  includeParticipantTiles = true,
+  regionLabel = "Live call media streams"
+}: ActiveCallMediaStreamsProps) {
+  const { activeCall, currentUser, getProfile } = useAppState();
+
+  if (!activeCall) {
+    return null;
+  }
+
+  const displayTiles = buildCallDisplayTiles(activeCall, currentUser, getProfile, { includeLocal, includeParticipantTiles });
+
+  if (displayTiles.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={className} aria-label={regionLabel}>
+      {displayTiles.map((tile) => (
+        <CallStreamTile key={tile.id} tile={tile} />
+      ))}
+    </section>
   );
 }
 
@@ -134,9 +155,11 @@ type CallStreamTileProps = {
 
 function CallStreamTile({ tile }: CallStreamTileProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const stream = tile.stream;
+  const isLocal = tile.isLocal;
 
   useEffect(() => {
-    if (!tile.stream) {
+    if (!stream) {
       return undefined;
     }
 
@@ -146,14 +169,14 @@ function CallStreamTile({ tile }: CallStreamTileProps) {
     }
 
     element.autoplay = true;
-    element.defaultMuted = tile.isLocal;
-    element.muted = tile.isLocal;
+    element.defaultMuted = isLocal;
+    element.muted = isLocal;
     element.playsInline = true;
 
-    const attachedElement = tile.stream.track.attach(element) as HTMLVideoElement;
+    const attachedElement = stream.track.attach(element) as HTMLVideoElement;
     attachedElement.autoplay = true;
-    attachedElement.defaultMuted = tile.isLocal;
-    attachedElement.muted = tile.isLocal;
+    attachedElement.defaultMuted = isLocal;
+    attachedElement.muted = isLocal;
     attachedElement.playsInline = true;
     const userAgent = attachedElement.ownerDocument.defaultView?.navigator.userAgent ?? "";
 
@@ -171,10 +194,10 @@ function CallStreamTile({ tile }: CallStreamTileProps) {
     }
 
     return () => {
-      tile.stream?.track.detach(attachedElement);
+      stream.track.detach(attachedElement);
       attachedElement.srcObject = null;
     };
-  }, [tile]);
+  }, [isLocal, stream]);
 
   return (
     <article
@@ -217,8 +240,14 @@ function CallStreamTile({ tile }: CallStreamTileProps) {
 function buildCallDisplayTiles(
   activeCall: NonNullable<ReturnType<typeof useAppState>["activeCall"]>,
   currentUser: ParticipantProfile,
-  getProfile: ReturnType<typeof useAppState>["getProfile"]
+  getProfile: ReturnType<typeof useAppState>["getProfile"],
+  options?: {
+    includeLocal?: boolean;
+    includeParticipantTiles?: boolean;
+  }
 ) {
+  const includeLocal = options?.includeLocal ?? false;
+  const includeParticipantTiles = options?.includeParticipantTiles ?? true;
   const cameraStreamsByPubkey = new Map<string, CallMediaStream>();
   const screenShareStreams: CallMediaStream[] = [];
 
@@ -237,33 +266,37 @@ function buildCallDisplayTiles(
     new Set([...activeCall.participantPubkeys, ...activeCall.mediaStreams.map((stream) => stream.pubkey)])
   );
 
-  const participantTiles: CallDisplayTile[] = participantPubkeys
-    .filter((pubkey) => pubkey !== currentUser.pubkey)
-    .map((pubkey) => {
-      const profile = getProfile(pubkey);
-      const stream = cameraStreamsByPubkey.get(pubkey);
+  const participantTiles: CallDisplayTile[] = includeParticipantTiles
+    ? participantPubkeys
+        .filter((pubkey) => includeLocal || pubkey !== currentUser.pubkey)
+        .map((pubkey) => {
+          const isLocal = pubkey === currentUser.pubkey;
+          const profile = isLocal ? currentUser : getProfile(pubkey);
+          const stream = cameraStreamsByPubkey.get(pubkey);
 
-      return {
-        id: `camera:${pubkey}`,
-        pubkey,
-        source: "camera",
-        isLocal: false,
-        stream,
-        participantLabel: resolveParticipantLabel(profile, pubkey),
-        participantPicture: profile?.picture
-      };
-    });
+          return {
+            id: `camera:${pubkey}`,
+            pubkey,
+            source: "camera",
+            isLocal,
+            stream,
+            participantLabel: resolveParticipantLabel(profile, pubkey),
+            participantPicture: profile?.picture
+          };
+        })
+    : [];
 
   const screenTiles: CallDisplayTile[] = screenShareStreams
-    .filter((stream) => stream.pubkey !== currentUser.pubkey)
+    .filter((stream) => includeLocal || stream.pubkey !== currentUser.pubkey)
     .map((stream) => {
-      const profile = getProfile(stream.pubkey);
+      const isLocal = stream.pubkey === currentUser.pubkey;
+      const profile = isLocal ? currentUser : getProfile(stream.pubkey);
 
       return {
         id: stream.id,
         pubkey: stream.pubkey,
         source: "screen_share",
-        isLocal: false,
+        isLocal,
         stream,
         participantLabel: resolveParticipantLabel(profile, stream.pubkey),
         participantPicture: profile?.picture
@@ -273,7 +306,7 @@ function buildCallDisplayTiles(
   return [...participantTiles, ...screenTiles];
 }
 
-function ToggleControlButton({ active, disabled = false, icon, label, onClick, title }: ToggleControlButtonProps) {
+function ToggleControlButton({ active, disabled = false, icon, label, onClick }: ToggleControlButtonProps) {
   return (
     <button
       className={active ? "call-control-button active" : "call-control-button"}
@@ -281,7 +314,6 @@ function ToggleControlButton({ active, disabled = false, icon, label, onClick, t
       aria-label={`${label} ${active ? "on" : "off"}`}
       aria-pressed={active}
       disabled={disabled}
-      title={disabled ? title : `${label} ${active ? "on" : "off"}`}
       onClick={onClick}
     >
       <span className="call-control-icon" aria-hidden="true">
@@ -293,7 +325,7 @@ function ToggleControlButton({ active, disabled = false, icon, label, onClick, t
 
 function ActionControlButton({ icon, label, onClick }: ActionControlButtonProps) {
   return (
-    <button className="call-control-button danger" type="button" aria-label={label} title={label} onClick={onClick}>
+    <button className="call-control-button danger" type="button" aria-label={label} onClick={onClick}>
       <span className="call-control-icon" aria-hidden="true">
         {icon}
       </span>

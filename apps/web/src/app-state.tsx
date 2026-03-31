@@ -60,17 +60,23 @@ import {
   type LiveKitSession
 } from "./livekit-session";
 import { hasNostrSigner, MediaAuthError, requestLiveKitToken, uploadBlossomFile } from "./media-client";
-import { publishGeoNote, queryGeoNotes, queryProfileMetadata } from "./nostr";
+import {
+  publishBeaconDefinition,
+  publishGeoNote,
+  publishGeoReaction,
+  queryBeaconDefinitions,
+  queryGeoNotes,
+  queryProfileMetadata
+} from "./nostr";
 import {
   isValidGeoNote,
   normalizeGeoNotePayload,
   normalizeBootstrapPayload,
   normalizeCallIntentPayload,
-  normalizeCreateBeaconResponsePayload,
   type BootstrapPayload,
-  type CallIntentPayload,
-  type CreateBeaconResponsePayload
+  type CallIntentPayload
 } from "./social-payload";
+import { normalizePublicKeyNpub } from "./nostr-utils";
 import { showToast } from "./toast";
 
 type CallControl = "mic" | "cam" | "screenshare" | "deafen";
@@ -138,7 +144,8 @@ type AppStateValue = {
     geohash: string,
     details: { name: string; picture: string; about: string; tags: string[] }
   ) => Promise<{ beacon: Place; created: boolean }>;
-  createPlaceNote: (geohash: string, content: string) => GeoNote | null;
+  createPlaceNote: (geohash: string, content: string, options?: { replyTo?: GeoNote }) => GeoNote | null;
+  reactToPlaceNote: (noteID: string, emoji: string) => void;
   uploadPlaceMedia: (geohash: string, file: File, signal?: AbortSignal) => Promise<PlaceMediaAsset | null>;
   joinBeaconCall: (geohash: string) => void;
   joinPlaceCall: (geohash: string) => void;
@@ -175,6 +182,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   );
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
   const [placesState, setPlacesState] = useState<Place[]>([]);
+  const [relayBeaconPlacesState, setRelayBeaconPlacesState] = useState<Place[]>([]);
   const [profilesState, setProfilesState] = useState<ParticipantProfile[]>([]);
   const [localProfileMetadataState, setLocalProfileMetadataState] = useState<Record<string, LocalProfileMetadata>>({});
   const [notesState, setNotesState] = useState<GeoNote[]>([]);
@@ -234,6 +242,65 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     requestedProfileMetadataPubkeysRef.current.clear();
     setLocalProfileMetadataState({});
+  }, [relayURL]);
+
+  useEffect(() => {
+    if (currentUserPubkeyOverride) {
+      return;
+    }
+
+    const nostr = window.nostr;
+    if (!nostr || typeof nostr.getPublicKey !== "function") {
+      return;
+    }
+
+    let cancelled = false;
+
+    void nostr.getPublicKey()
+      .then((pubkey) => {
+        if (cancelled) {
+          return;
+        }
+
+        const normalizedPubkey = normalizePublicKeyNpub(pubkey).trim();
+        if (!normalizedPubkey) {
+          return;
+        }
+
+        setCurrentUserPubkeyOverride(normalizedPubkey);
+      })
+      .catch(() => {
+        // Keep bootstrap identity when the signer pubkey is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserPubkeyOverride]);
+
+  useEffect(() => {
+    if (import.meta.env.MODE === "test") {
+      return;
+    }
+
+    let cancelled = false;
+    setRelayBeaconPlacesState([]);
+
+    void queryBeaconDefinitions(relayURL)
+      .then((relayBeacons) => {
+        if (cancelled || relayBeacons.length === 0) {
+          return;
+        }
+
+        setRelayBeaconPlacesState((current) => mergeRelayBeaconPlaces(current, relayBeacons));
+      })
+      .catch(() => {
+        // Keep bootstrap places when the relay query is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [relayURL]);
 
   useEffect(() => {
@@ -338,7 +405,10 @@ export function AppStateProvider({ children }: PropsWithChildren) {
 
   const effectiveCurrentUserPubkey =
     currentUserPubkeyOverride?.trim() || bootstrapCurrentUserPubkey.trim() || defaultCurrentUserPubkey;
-  const effectivePlaces = placesState;
+  const effectivePlaces = useMemo(
+    () => mergeRelayBeaconPlaces(placesState, relayBeaconPlacesState),
+    [placesState, relayBeaconPlacesState]
+  );
   const effectiveProfiles = useMemo(
     () => mergeLocalProfileMetadata(profilesState, localProfileMetadataState),
     [localProfileMetadataState, profilesState]
@@ -477,6 +547,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       const place = placeMap.get(geohash) ?? createEphemeralPlace(geohash);
 
       disconnectLiveKitSession();
+      setActiveCall(null);
 
       const requestID = activeCallRequestRef.current + 1;
       activeCallRequestRef.current = requestID;
@@ -543,15 +614,22 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         ? place.occupantPubkeys
         : [effectiveCurrentUserPubkey, ...place.occupantPubkeys];
       const fallbackRoomID = resolveRoomID(geohash, relayOperatorPubkey);
-      const signerAvailable = hasNostrSigner();
+      const activeLocalKey = getActiveLocalKey(loadStoredLocalKeyring());
+      const mediaSigningOptions = activeLocalKey?.privateKeyHex
+        ? {
+            privateKeyHex: activeLocalKey.privateKeyHex,
+            publicKeyHex: activeLocalKey.publicKeyHex
+          }
+        : undefined;
+      const signerAvailable = Boolean(mediaSigningOptions) || hasNostrSigner();
 
-      applyIntent(fallbackRoomID, place.title, fallbackParticipants, {
-        transport: "local",
-        connectionState: signerAvailable ? "connecting" : "local_preview",
-        statusMessage: signerAvailable
-          ? "Resolving LiveKit access for this room."
-          : "Signer required for LiveKit media. Room intent stays local."
-      });
+      if (!signerAvailable) {
+        applyIntent(fallbackRoomID, place.title, fallbackParticipants, {
+          transport: "local",
+          connectionState: "local_preview",
+          statusMessage: "Signer required for LiveKit media. Room intent stays local."
+        });
+      }
 
       const intentPromise =
         import.meta.env.MODE === "test"
@@ -582,26 +660,23 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       void intentPromise.then(async (payload) => {
         const normalizedPayload = normalizeCallIntentPayload(payload);
         const roomID = normalizedPayload.room_id || fallbackRoomID;
-        const placeTitle = normalizedPayload.place_title || place.title;
+        const placeTitle = place.title || normalizedPayload.place_title || `Field tile ${geohash}`;
         const participantPubkeys =
           normalizedPayload.participant_pubkeys.length > 0
             ? normalizedPayload.participant_pubkeys
             : fallbackParticipants;
 
-        applyIfCurrent(roomID, placeTitle, participantPubkeys, {
-          transport: "local",
-          connectionState: signerAvailable ? "connecting" : "local_preview",
-          statusMessage: signerAvailable
-            ? "Resolving LiveKit access for this room."
-            : "Signer required for LiveKit media. Room intent stays local."
-        });
-
         if (!signerAvailable) {
+          applyIfCurrent(roomID, placeTitle, participantPubkeys, {
+            transport: "local",
+            connectionState: "local_preview",
+            statusMessage: "Signer required for LiveKit media. Room intent stays local."
+          });
           return;
         }
 
         try {
-          const tokenResponse = await requestLiveKitToken(roomID);
+          const tokenResponse = await requestLiveKitToken(roomID, mediaSigningOptions);
           const initialCanPublish = tokenResponse.token.grants.can_publish;
           const initialCanSubscribe = tokenResponse.token.grants.can_subscribe;
           applyIfCurrent(roomID, placeTitle, participantPubkeys, {
@@ -720,11 +795,11 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                 ? error.message
                 : "Media temporarily unavailable.";
 
-          applyIfCurrent(roomID, placeTitle, participantPubkeys, {
-            transport: "local",
-            connectionState: "failed",
-            statusMessage: message
-          });
+          if (requestID !== activeCallRequestRef.current) {
+            return;
+          }
+
+          setActiveCall(null);
           showToast(message, "info");
         }
       });
@@ -916,15 +991,15 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           throw new Error("Beacon location is required.");
         }
 
-        if (import.meta.env.MODE === "test") {
-          const existingPlace = placeMap.get(normalizedGeohash);
-          if (existingPlace) {
-            return {
-              beacon: existingPlace,
-              created: false
-            };
-          }
+        const existingPlace = placeMap.get(normalizedGeohash);
+        if (existingPlace) {
+          return {
+            beacon: existingPlace,
+            created: false
+          };
+        }
 
+        if (import.meta.env.MODE === "test") {
           if (!normalizedName) {
             throw new Error("Beacon name is required.");
           }
@@ -935,7 +1010,10 @@ export function AppStateProvider({ children }: PropsWithChildren) {
             neighborhood: "Newly lit beacon",
             description: normalizedAbout,
             activitySummary: "Freshly lit beacon.",
+            createdAt: new Date().toISOString(),
             picture: normalizedPicture || undefined,
+            ownerPubkey: effectiveCurrentUserPubkey,
+            memberPubkeys: [effectiveCurrentUserPubkey],
             tags: ["beacon", "geohash8", ...normalizedTags],
             capacity: 8,
             occupantPubkeys: [],
@@ -949,33 +1027,72 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           };
         }
 
-        const payload = normalizeCreateBeaconResponsePayload(
-          await apiFetch<CreateBeaconResponsePayload>("/api/v1/social/beacons", {
-            method: "POST",
-            body: JSON.stringify({
-              geohash: normalizedGeohash,
-              name: normalizedName,
-              pic: normalizedPicture,
-              about: normalizedAbout,
-              tags: normalizedTags
-            })
-          })
-        );
+        const activeLocalKey = getActiveLocalKey(loadStoredLocalKeyring());
+        const signingOptions = activeLocalKey
+          ? {
+              privateKeyHex: activeLocalKey.privateKeyHex,
+              publicKeyHex: activeLocalKey.publicKeyHex
+            }
+          : undefined;
 
-        if (!payload.beacon) {
-          throw new Error("Beacon response was incomplete.");
+        if (!signingOptions && !hasNostrSigner()) {
+          throw new Error("A Nostr signer or local keypair is required to create a beacon.");
         }
 
-        const beacon = payload.beacon;
-        setPlacesState((previous) => upsertPlace(previous, beacon));
+        const existingRelayBeacons = await queryBeaconDefinitions(relayURL, normalizedGeohash);
+        if (existingRelayBeacons.length > 0) {
+          const beacon = existingRelayBeacons[0];
+          setRelayBeaconPlacesState((previous) => upsertPlace(previous, beacon));
+          return {
+            beacon,
+            created: false
+          };
+        }
+
+        if (!normalizedName) {
+          throw new Error("Beacon name is required.");
+        }
+
+        const beacon = await publishBeaconDefinition(
+          relayURL,
+          normalizedGeohash,
+          {
+            name: normalizedName,
+            picture: normalizedPicture,
+            about: normalizedAbout,
+            tags: normalizedTags
+          },
+          signingOptions
+        );
+        setRelayBeaconPlacesState((previous) => upsertPlace(previous, beacon));
         return {
           beacon,
-          created: payload.created
+          created: true
         };
       },
-      createPlaceNote: (geohash, content) => {
+      createPlaceNote: (geohash, content, options) => {
         const trimmed = content.trim();
         if (!trimmed) {
+          return null;
+        }
+
+        const replyTo = options?.replyTo ? noteMap.get(options.replyTo.id) ?? options.replyTo : undefined;
+        const activeLocalKey = getActiveLocalKey(loadStoredLocalKeyring());
+        const signingOptions = activeLocalKey
+          ? {
+              privateKeyHex: activeLocalKey.privateKeyHex,
+              publicKeyHex: activeLocalKey.publicKeyHex
+            }
+          : undefined;
+        const signerAvailable = Boolean(signingOptions) || hasNostrSigner();
+
+        if (replyTo && import.meta.env.MODE !== "test" && !isRelayBackedEventID(replyTo.id)) {
+          showToast("Wait for this note to sync from the relay before sending a tagged reply.", "info");
+          return null;
+        }
+
+        if (replyTo && import.meta.env.MODE !== "test" && !signerAvailable) {
+          showToast("A Nostr signer or local keypair is required to publish a tagged reply.", "info");
           return null;
         }
 
@@ -985,36 +1102,55 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           authorPubkey: effectiveCurrentUserPubkey,
           content: trimmed,
           createdAt: new Date().toISOString(),
-          replies: 0
+          replies: 0,
+          replyTargetId: replyTo?.id,
+          rootNoteId: replyTo?.rootNoteId ?? replyTo?.id,
+          taggedPubkeys:
+            replyTo ? dedupeTaggedPubkeys([replyTo.authorPubkey, ...(replyTo.taggedPubkeys ?? [])]) : undefined,
+          reactions: []
         };
 
-        setNotesState((previous) => [nextNote, ...previous]);
-        const activeLocalKey = getActiveLocalKey(loadStoredLocalKeyring());
+        setNotesState((previous) => addOptimisticNote(previous, nextNote));
 
-        if (activeLocalKey || hasNostrSigner()) {
+        if (signerAvailable) {
           void publishGeoNote(
             relayURL,
             geohash,
             trimmed,
-            activeLocalKey
+            signingOptions,
+            replyTo
               ? {
-                  privateKeyHex: activeLocalKey.privateKeyHex,
-                  publicKeyHex: activeLocalKey.publicKeyHex
+                  replyTarget: replyTo
                 }
               : undefined
-          ).catch((error) => {
-            showToast(
-              error instanceof Error
-                ? `Note saved in Concierge, but relay publish failed: ${error.message}`
-                : "Note saved in Concierge, but relay publish failed.",
-              "info"
-            );
-          });
+          )
+            .then((publishedNote) => {
+              const normalizedPublishedNote = normalizePublishedGeoNote(
+                publishedNote,
+                geohash,
+                replyTo,
+                nextNote.taggedPubkeys
+              );
+
+              setNotesState((previous) => replaceNoteByID(previous, nextNote.id, normalizedPublishedNote));
+            })
+            .catch((error) => {
+              showToast(
+                error instanceof Error
+                  ? `${
+                      replyTo ? "Reply saved locally, but relay publish failed" : "Note saved in Concierge, but relay publish failed"
+                    }: ${error.message}`
+                  : replyTo
+                    ? "Reply saved locally, but relay publish failed."
+                    : "Note saved in Concierge, but relay publish failed.",
+                "info"
+              );
+            });
         } else if (import.meta.env.MODE !== "test") {
           showToast("Note saved in Concierge, but no Nostr signer is available for relay publish.", "info");
         }
 
-        if (import.meta.env.MODE !== "test") {
+        if (!replyTo && import.meta.env.MODE !== "test") {
           void apiFetch<GeoNote>("/api/v1/social/notes", {
             method: "POST",
             body: JSON.stringify({
@@ -1030,16 +1166,56 @@ export function AppStateProvider({ children }: PropsWithChildren) {
                 return;
               }
 
-              setNotesState((previous) => [
-                normalizedServerNote,
-                ...previous.filter((note) => note.id !== nextNote.id)
-              ]);
+              setNotesState((previous) => reconcileServerNote(previous, nextNote.id, normalizedServerNote));
             })
             .catch(() => {
               showToast("Note saved locally. Will sync when connected.", "info");
             });
         }
         return nextNote;
+      },
+      reactToPlaceNote: (noteID, emoji) => {
+        const normalizedEmoji = emoji.trim();
+        if (!normalizedEmoji) {
+          return;
+        }
+
+        const note = noteMap.get(noteID);
+        if (!note) {
+          return;
+        }
+
+        if (import.meta.env.MODE !== "test" && !isRelayBackedEventID(note.id)) {
+          showToast("Wait for this note to sync from the relay before reacting.", "info");
+          return;
+        }
+
+        const activeLocalKey = getActiveLocalKey(loadStoredLocalKeyring());
+        const signingOptions = activeLocalKey
+          ? {
+              privateKeyHex: activeLocalKey.privateKeyHex,
+              publicKeyHex: activeLocalKey.publicKeyHex
+            }
+          : undefined;
+
+        if (import.meta.env.MODE !== "test" && !signingOptions && !hasNostrSigner()) {
+          showToast("A Nostr signer or local keypair is required to publish emoji reactions.", "info");
+          return;
+        }
+
+        setNotesState((previous) => updateNoteReaction(previous, noteID, normalizedEmoji, 1));
+
+        if (import.meta.env.MODE === "test") {
+          return;
+        }
+
+        void publishGeoReaction(relayURL, note, normalizedEmoji, signingOptions).catch((error) => {
+          setNotesState((previous) => updateNoteReaction(previous, noteID, normalizedEmoji, -1));
+          showToast(
+            error instanceof Error ? `Unable to publish emoji reaction: ${error.message}` : "Unable to publish emoji reaction.",
+            "info"
+          );
+        });
       },
       uploadPlaceMedia: async (geohash, file, signal) => {
         const place = placeMap.get(geohash);
@@ -1285,6 +1461,128 @@ function shouldQueryProfileMetadata(
   return !knownName || !knownPicture;
 }
 
+function addOptimisticNote(currentNotes: GeoNote[], nextNote: GeoNote) {
+  const nextNotes = [nextNote, ...currentNotes];
+
+  if (!nextNote.replyTargetId) {
+    return nextNotes;
+  }
+
+  return nextNotes.map((note) =>
+    note.id === nextNote.replyTargetId
+      ? {
+          ...note,
+          replies: note.replies + 1
+        }
+      : note
+  );
+}
+
+function replaceNoteByID(currentNotes: GeoNote[], noteID: string, nextNote: GeoNote) {
+  return currentNotes.map((note) => (note.id === noteID ? nextNote : note));
+}
+
+function reconcileServerNote(currentNotes: GeoNote[], optimisticNoteID: string, serverNote: GeoNote) {
+  const existingNote =
+    currentNotes.find((note) => note.id === optimisticNoteID) ??
+    currentNotes.find((note) => areEquivalentBeaconNotes(note, serverNote));
+
+  if (!existingNote) {
+    return [serverNote, ...currentNotes];
+  }
+
+  const mergedNote = {
+    ...serverNote,
+    id: isRelayBackedEventID(existingNote.id) ? existingNote.id : serverNote.id,
+    replies: Math.max(existingNote.replies, serverNote.replies),
+    replyTargetId: existingNote.replyTargetId ?? serverNote.replyTargetId,
+    rootNoteId: existingNote.rootNoteId ?? serverNote.rootNoteId,
+    taggedPubkeys: dedupeTaggedPubkeys([...(existingNote.taggedPubkeys ?? []), ...(serverNote.taggedPubkeys ?? [])]),
+    reactions: mergeNoteReactions(existingNote.reactions, serverNote.reactions)
+  };
+
+  return [mergedNote, ...currentNotes.filter((note) => note.id !== existingNote.id)];
+}
+
+function normalizePublishedGeoNote(
+  event: NostrSignedEvent,
+  defaultGeohash: string,
+  replyTo?: GeoNote,
+  taggedPubkeys?: string[]
+): GeoNote {
+  return {
+    id: event.id,
+    geohash: defaultGeohash,
+    authorPubkey: normalizePublicKeyNpub(event.pubkey),
+    content: event.content.trim(),
+    createdAt: new Date(event.created_at * 1000).toISOString(),
+    replies: 0,
+    replyTargetId: replyTo?.id,
+    rootNoteId: replyTo?.rootNoteId ?? replyTo?.id,
+    taggedPubkeys,
+    reactions: []
+  };
+}
+
+function updateNoteReaction(currentNotes: GeoNote[], noteID: string, emoji: string, delta: number) {
+  if (delta === 0) {
+    return currentNotes;
+  }
+
+  return currentNotes.map((note) => {
+    if (note.id !== noteID) {
+      return note;
+    }
+
+    return {
+      ...note,
+      reactions: adjustReactionCounts(note.reactions, emoji, delta)
+    };
+  });
+}
+
+function adjustReactionCounts(reactions: GeoNote["reactions"], emoji: string, delta: number) {
+  const counts = new Map((reactions ?? []).map((reaction) => [reaction.emoji, reaction.count]));
+  const nextCount = Math.max(0, (counts.get(emoji) ?? 0) + delta);
+
+  if (nextCount > 0) {
+    counts.set(emoji, nextCount);
+  } else {
+    counts.delete(emoji);
+  }
+
+  return counts.size > 0
+    ? Array.from(counts.entries())
+        .map(([reactionEmoji, count]) => ({ emoji: reactionEmoji, count }))
+        .sort((left, right) => right.count - left.count || left.emoji.localeCompare(right.emoji))
+    : undefined;
+}
+
+function mergeNoteReactions(...collections: Array<GeoNote["reactions"] | undefined>) {
+  const counts = new Map<string, number>();
+
+  for (const collection of collections) {
+    for (const reaction of collection ?? []) {
+      counts.set(reaction.emoji, Math.max(counts.get(reaction.emoji) ?? 0, reaction.count));
+    }
+  }
+
+  return counts.size > 0
+    ? Array.from(counts.entries())
+        .map(([emoji, count]) => ({ emoji, count }))
+        .sort((left, right) => right.count - left.count || left.emoji.localeCompare(right.emoji))
+    : undefined;
+}
+
+function dedupeTaggedPubkeys(pubkeys: string[]) {
+  const unique = Array.from(new Set(pubkeys.map((pubkey) => pubkey.trim()).filter(Boolean)));
+  return unique.length > 0 ? unique : undefined;
+}
+
+function isRelayBackedEventID(noteID: string) {
+  return /^[0-9a-f]{64}$/i.test(noteID.trim());
+}
+
 function mergeRelayNotes(currentNotes: GeoNote[], relayNotes: GeoNote[]) {
   const merged = new Map(currentNotes.map((note) => [note.id, note]));
 
@@ -1296,7 +1594,11 @@ function mergeRelayNotes(currentNotes: GeoNote[], relayNotes: GeoNote[]) {
     const existing = merged.get(relayNote.id);
     merged.set(relayNote.id, {
       ...relayNote,
-      replies: existing?.replies ?? relayNote.replies
+      replies: Math.max(existing?.replies ?? 0, relayNote.replies),
+      replyTargetId: relayNote.replyTargetId ?? existing?.replyTargetId,
+      rootNoteId: relayNote.rootNoteId ?? existing?.rootNoteId,
+      taggedPubkeys: dedupeTaggedPubkeys([...(existing?.taggedPubkeys ?? []), ...(relayNote.taggedPubkeys ?? [])]),
+      reactions: mergeNoteReactions(existing?.reactions, relayNote.reactions)
     });
   }
 
@@ -1319,7 +1621,9 @@ function areEquivalentBeaconNotes(left: GeoNote, right: GeoNote) {
   if (
     left.geohash !== right.geohash ||
     left.authorPubkey !== right.authorPubkey ||
-    left.content.trim() !== right.content.trim()
+    left.content.trim() !== right.content.trim() ||
+    (left.replyTargetId ?? "") !== (right.replyTargetId ?? "") ||
+    (left.rootNoteId ?? "") !== (right.rootNoteId ?? "")
   ) {
     return false;
   }
@@ -1333,8 +1637,84 @@ function areEquivalentBeaconNotes(left: GeoNote, right: GeoNote) {
   return left.createdAt === right.createdAt;
 }
 
+function mergeRelayBeaconPlaces(currentPlaces: Place[], relayBeacons: Place[]) {
+  if (relayBeacons.length === 0) {
+    return currentPlaces;
+  }
+
+  const pendingRelayBeacons = new Map(relayBeacons.map((place) => [place.geohash, place]));
+  const mergedPlaces = currentPlaces.map((place) => {
+    const relayBeacon = pendingRelayBeacons.get(place.geohash);
+    if (!relayBeacon) {
+      return place;
+    }
+
+    pendingRelayBeacons.delete(place.geohash);
+    return mergePlace(place, relayBeacon);
+  });
+
+  return [...pendingRelayBeacons.values(), ...mergedPlaces];
+}
+
+function mergePlace(currentPlace: Place | undefined, nextPlace: Place) {
+  if (!currentPlace) {
+    return nextPlace;
+  }
+
+  return {
+    geohash: nextPlace.geohash || currentPlace.geohash,
+    title: nextPlace.title.trim() || currentPlace.title,
+    neighborhood: nextPlace.neighborhood.trim() || currentPlace.neighborhood,
+    description: nextPlace.description.trim() || currentPlace.description,
+    activitySummary: nextPlace.activitySummary.trim() || currentPlace.activitySummary,
+    createdAt: nextPlace.createdAt || currentPlace.createdAt,
+    picture: nextPlace.picture?.trim() || currentPlace.picture,
+    ownerPubkey: nextPlace.ownerPubkey?.trim() || currentPlace.ownerPubkey,
+    memberPubkeys: mergePubkeys(currentPlace.memberPubkeys, nextPlace.memberPubkeys, currentPlace.ownerPubkey, nextPlace.ownerPubkey),
+    tags: mergePlaceTags(currentPlace.tags, nextPlace.tags),
+    capacity: nextPlace.capacity > 0 ? nextPlace.capacity : currentPlace.capacity,
+    occupantPubkeys: nextPlace.occupantPubkeys.length > 0 ? nextPlace.occupantPubkeys : currentPlace.occupantPubkeys,
+    unread: nextPlace.unread || currentPlace.unread,
+    pinnedNoteId: nextPlace.pinnedNoteId || currentPlace.pinnedNoteId
+  };
+}
+
+function mergePlaceTags(currentTags: string[], nextTags: string[]) {
+  const merged = new Set<string>();
+
+  for (const tag of [...currentTags, ...nextTags]) {
+    const normalized = tag.trim();
+    if (normalized) {
+      merged.add(normalized);
+    }
+  }
+
+  return Array.from(merged);
+}
+
+function mergePubkeys(...collections: Array<string[] | string | undefined>) {
+  const merged = new Set<string>();
+
+  for (const collection of collections) {
+    if (!collection) {
+      continue;
+    }
+
+    const pubkeys = Array.isArray(collection) ? collection : [collection];
+    for (const pubkey of pubkeys) {
+      const normalized = pubkey.trim();
+      if (normalized) {
+        merged.add(normalized);
+      }
+    }
+  }
+
+  return merged.size > 0 ? Array.from(merged) : undefined;
+}
+
 function upsertPlace(currentPlaces: Place[], nextPlace: Place) {
-  return [nextPlace, ...currentPlaces.filter((place) => place.geohash !== nextPlace.geohash)];
+  const currentPlace = currentPlaces.find((place) => place.geohash === nextPlace.geohash);
+  return [mergePlace(currentPlace, nextPlace), ...currentPlaces.filter((place) => place.geohash !== nextPlace.geohash)];
 }
 
 function createRelayListEntry(name: string, url: string): RelayListEntry {

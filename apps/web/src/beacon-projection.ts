@@ -26,7 +26,10 @@ export type BeaconThread = {
   name: string;
   about: string;
   noteCount: number;
+  createdAt?: string;
   participants: string[];
+  ownerPubkey?: string;
+  memberPubkeys?: string[];
   unread: boolean;
   activeCall: boolean;
   pinnedNoteId?: string;
@@ -89,6 +92,7 @@ export function buildBeaconProjection(
 
   for (const place of effectivePlaces) {
     const participants = getPlaceParticipantPubkeys(place, activeCall, currentPubkey);
+    const memberPubkeys = dedupePubkeys([place.ownerPubkey, ...(place.memberPubkeys ?? [])]);
     const sortedNotes = notesByGeohash.get(place.geohash) ?? [];
     const pinnedNote = place.pinnedNoteId ? sortedNotes.find((note) => note.id === place.pinnedNoteId) : undefined;
     const cohort = buildCohortBeaconMetadata(place, pinnedNote, sortedNotes);
@@ -129,7 +133,10 @@ export function buildBeaconProjection(
       name,
       about,
       noteCount: sortedNotes.length,
+      createdAt: place.createdAt,
       participants,
+      ownerPubkey: place.ownerPubkey,
+      memberPubkeys: memberPubkeys.length > 0 ? memberPubkeys : undefined,
       unread: place.unread,
       activeCall: live,
       pinnedNoteId: place.pinnedNoteId,
@@ -147,6 +154,10 @@ export function buildBeaconProjection(
     notesByGeohash,
     participantPubkeysByGeohash
   };
+}
+
+function dedupePubkeys(pubkeys: Array<string | undefined>) {
+  return Array.from(new Set(pubkeys.map((pubkey) => pubkey?.trim() ?? "").filter((pubkey) => pubkey.length > 0)));
 }
 
 function resolveBeaconAbout(place: Place) {

@@ -116,6 +116,42 @@ describe("media client", () => {
       expect.any(Object)
     );
   });
+
+  it("surfaces structured LiveKit token deny reasons instead of a generic 403", async () => {
+    const { requestLiveKitToken } = await import("./media-client");
+    const key = importLocalKeyMaterial(
+      "1111111111111111111111111111111111111111111111111111111111111111"
+    );
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          decision: "deny",
+          reason: "required_proof",
+          scope: "media.join",
+          proof_requirement: "nostr_auth"
+        }),
+        {
+          status: 403,
+          headers: { "Content-Type": "application/json" }
+        }
+      )
+    );
+
+    await expect(
+      requestLiveKitToken("beacon:9q8yyk", {
+        privateKeyHex: key.privateKeyHex,
+        publicKeyHex: key.publicKeyHex
+      })
+    ).rejects.toMatchObject({
+      name: "ApiError",
+      message: "This room requires verified nostr auth.",
+      status: 403,
+      data: expect.objectContaining({
+        reason: "required_proof"
+      })
+    });
+  });
 });
 
 async function sha256Hex(value: Blob) {

@@ -17,6 +17,7 @@ import (
 
 	livekitauth "github.com/livekit/protocol/auth"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/config"
 	scLiveKit "github.com/peterwei/synchrono-city/apps/concierge/internal/livekit"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/social"
@@ -212,6 +213,58 @@ func TestSocialBeaconCreateOrReturnExisting(t *testing.T) {
 	}
 	if duplicateResponse.Beacon.Title != "Lantern Point" {
 		t.Fatalf("expected original beacon title, got %+v", duplicateResponse.Beacon)
+	}
+}
+
+func TestSocialBeaconCreateGrantsCreatorRoomAccess(t *testing.T) {
+	creatorPubkey := mustPublicKeyNpub(t, guestSecretKey(t))
+	policyStore := store.NewMemory()
+	srv := NewServer(config.Config{
+		LiveKitAPIKey:      "devkey",
+		LiveKitAPISecret:   "devsecret",
+		LiveKitURL:         "ws://livekit.example.test",
+		PrimaryOperatorPub: mustPublicKey(t, operatorSecretKey(t)),
+	}, policyStore)
+
+	createPayload := []byte(`{"geohash":"9q8yyk34","name":"Lantern Point","pic":"","about":"Meet after sunset.","tags":["cohort"],"pubkey":"` + creatorPubkey + `"}`)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/social/beacons", bytes.NewReader(createPayload))
+	createRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", createRec.Code, createRec.Body.String())
+	}
+
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk34"}`)
+	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
+	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
+	tokenRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("expected token request 200, got %d body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var response struct {
+		Reason string `json:"reason"`
+		Token  struct {
+			Grants struct {
+				CanPublish   bool `json:"can_publish"`
+				CanSubscribe bool `json:"can_subscribe"`
+			} `json:"grants"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Reason != "room_permission" {
+		t.Fatalf("expected room_permission reason, got %s", response.Reason)
+	}
+	if !response.Token.Grants.CanPublish || !response.Token.Grants.CanSubscribe {
+		t.Fatalf("expected creator speaker grants, got %+v", response.Token.Grants)
 	}
 }
 
@@ -707,6 +760,57 @@ func TestTokenAllowsDefaultListenerJoinForCohortBeacon(t *testing.T) {
 	}
 }
 
+func TestTokenAllowsDefaultSpeakerJoinForPlainBeacon(t *testing.T) {
+	policyStore := store.NewMemory()
+	srv := NewServer(config.Config{
+		LiveKitAPIKey:      "devkey",
+		LiveKitAPISecret:   "devsecret",
+		LiveKitURL:         "ws://livekit.example.test",
+		PrimaryOperatorPub: mustPublicKey(t, operatorSecretKey(t)),
+	}, policyStore)
+	seedSocialScene(t, srv,
+		[]social.Place{{
+			Geohash: "9q8yyk",
+			Title:   "Civic Plaza",
+			Tags:    []string{"beacon"},
+		}},
+		nil,
+		nil,
+		nil,
+	)
+
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
+	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
+	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
+	tokenRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("expected token request 200, got %d body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var response struct {
+		Reason string `json:"reason"`
+		Token  struct {
+			Grants struct {
+				CanPublish   bool `json:"can_publish"`
+				CanSubscribe bool `json:"can_subscribe"`
+			} `json:"grants"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Reason != "room_default_listener" {
+		t.Fatalf("expected room_default_listener reason for default beacon access, got %s", response.Reason)
+	}
+	if !response.Token.Grants.CanPublish || !response.Token.Grants.CanSubscribe {
+		t.Fatalf("expected default beacon speaker grants, got %+v", response.Token.Grants)
+	}
+}
+
 func TestOperatorTokenGetsFullRoomGrants(t *testing.T) {
 	operatorPubkey := mustPublicKey(t, operatorSecretKey(t))
 	srv := NewServer(config.Config{
@@ -749,6 +853,57 @@ func TestOperatorTokenGetsFullRoomGrants(t *testing.T) {
 	}
 	if grants.Video.CanSubscribe == nil || !*grants.Video.CanSubscribe {
 		t.Fatalf("expected operator subscribe grant, got %+v", grants.Video)
+	}
+}
+
+func TestOwnerStandingTokenGetsFullRoomGrantsWithoutRoomPermission(t *testing.T) {
+	ownerPubkey := mustPublicKey(t, guestSecretKey(t))
+	policyStore := store.NewMemory()
+	if _, err := policyStore.CreateStandingRecord(t.Context(), store.StandingRecord{
+		SubjectPubkey:   ownerPubkey,
+		Standing:        "owner",
+		Scope:           "relay.admin",
+		GrantedByPubkey: mustPublicKey(t, operatorSecretKey(t)),
+	}); err != nil {
+		t.Fatalf("seed owner standing: %v", err)
+	}
+
+	srv := NewServer(config.Config{
+		LiveKitAPIKey:      "devkey",
+		LiveKitAPISecret:   "devsecret",
+		LiveKitURL:         "ws://livekit.example.test",
+		PrimaryOperatorPub: mustPublicKey(t, operatorSecretKey(t)),
+	}, policyStore)
+
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
+	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
+	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
+	tokenRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("expected token request 200, got %d body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var response struct {
+		Reason string `json:"reason"`
+		Token  struct {
+			Grants struct {
+				CanPublish   bool `json:"can_publish"`
+				CanSubscribe bool `json:"can_subscribe"`
+			} `json:"grants"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Reason != "local_standing" {
+		t.Fatalf("expected local_standing reason, got %s", response.Reason)
+	}
+	if !response.Token.Grants.CanPublish || !response.Token.Grants.CanSubscribe {
+		t.Fatalf("expected owner standing grants, got %+v", response.Token.Grants)
 	}
 }
 
@@ -1128,6 +1283,16 @@ func mustPublicKey(t *testing.T, secretKey string) string {
 		t.Fatalf("derive public key: %v", err)
 	}
 	return pubkey
+}
+
+func mustPublicKeyNpub(t *testing.T, secretKey string) string {
+	t.Helper()
+	pubkey := mustPublicKey(t, secretKey)
+	npub, err := nip19.EncodePublicKey(pubkey)
+	if err != nil {
+		t.Fatalf("encode npub: %v", err)
+	}
+	return npub
 }
 
 func seedSocialScene(

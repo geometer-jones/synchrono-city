@@ -24,7 +24,10 @@ export type Place = {
   neighborhood: string;
   description: string;
   activitySummary: string;
+  createdAt?: string;
   picture?: string;
+  ownerPubkey?: string;
+  memberPubkeys?: string[];
   tags: string[];
   capacity: number;
   occupantPubkeys: string[];
@@ -61,6 +64,15 @@ export type GeoNote = {
   content: string;
   createdAt: string;
   replies: number;
+  replyTargetId?: string;
+  rootNoteId?: string;
+  taggedPubkeys?: string[];
+  reactions?: GeoNoteReaction[];
+};
+
+export type GeoNoteReaction = {
+  emoji: string;
+  count: number;
 };
 
 export type FeedSegment = {

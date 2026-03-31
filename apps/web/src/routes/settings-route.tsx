@@ -40,6 +40,7 @@ import {
   validProofTypes,
   validStandings
 } from "../admin-client";
+import { useAppearance, type AppearanceMode } from "../appearance";
 import { ApiError, apiFetch } from "../api";
 import { useAppState } from "../app-state";
 import { ResizablePanels } from "../components/resizable-panels";
@@ -83,8 +84,26 @@ type MetadataDraft = {
 const defaultStanding = "member";
 const defaultProofType = "oauth";
 const defaultGateCapability = "relay.publish";
+const appearanceOptions: { value: AppearanceMode; label: string; description: string }[] = [
+  {
+    value: "dark",
+    label: "Dark",
+    description: "Keep the client in the default low-light palette."
+  },
+  {
+    value: "light",
+    label: "Light",
+    description: "Switch the interface to a brighter daylight palette."
+  },
+  {
+    value: "system",
+    label: "System",
+    description: "Follow your device color-scheme preference automatically."
+  }
+];
 
 export function SettingsRoute() {
+  const { appearanceMode, resolvedAppearanceMode, setAppearanceMode } = useAppearance();
   const {
     currentUser,
     profiles,
@@ -163,6 +182,7 @@ export function SettingsRoute() {
   const [relayDraftName, setRelayDraftName] = useState("");
   const [relayDraftURL, setRelayDraftURL] = useState("");
   const [relayListError, setRelayListError] = useState<string | null>(null);
+  const [appearanceOpen, setAppearanceOpen] = useState(true);
   const [keysOpen, setKeysOpen] = useState(true);
   const [relaysOpen, setRelaysOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -938,6 +958,57 @@ export function SettingsRoute() {
 
   return (
     <section className="panel route-surface route-surface-settings">
+      <SettingsSection
+        title="Appearance"
+        description="Choose whether the client stays dark, stays light, or follows your system preference."
+        isOpen={appearanceOpen}
+        onToggle={() => setAppearanceOpen((open) => !open)}
+        status={formatAppearanceStatus(appearanceMode, resolvedAppearanceMode)}
+      >
+        <article className="feature-card appearance-mode-card">
+          <div className="appearance-mode-head">
+            <div>
+              <p className="section-label">Theme mode</p>
+              <h3>
+                {appearanceMode === "system"
+                  ? "System appearance enabled"
+                  : `${formatAppearanceLabel(appearanceMode)} mode enabled`}
+              </h3>
+              <p className="muted">Updates apply immediately and persist in this browser.</p>
+            </div>
+            <span className="thread-pill">
+              {formatAppearanceLabel(resolvedAppearanceMode)} applied
+            </span>
+          </div>
+
+          <div className="appearance-mode-grid" role="radiogroup" aria-label="Appearance mode">
+            {appearanceOptions.map((option) => (
+              <label
+                key={option.value}
+                className={`appearance-mode-option${appearanceMode === option.value ? " is-active" : ""}`}
+              >
+                <input
+                  aria-label={option.label}
+                  type="radio"
+                  name="appearance-mode"
+                  value={option.value}
+                  checked={appearanceMode === option.value}
+                  onChange={() => setAppearanceMode(option.value)}
+                />
+                <span className="appearance-mode-label">{option.label}</span>
+                <span className="appearance-mode-description">{option.description}</span>
+              </label>
+            ))}
+          </div>
+
+          <p className="muted appearance-mode-footnote">
+            {appearanceMode === "system"
+              ? `System mode is currently applying ${resolvedAppearanceMode}.`
+              : `The client stays in ${appearanceMode} mode until you change this setting.`}
+          </p>
+        </article>
+      </SettingsSection>
+
       <SettingsSection
         title="Keys"
         description="Manage browser-local keypairs and profile metadata; the active key controls note authorship and place presence."
@@ -1779,6 +1850,18 @@ function SettingsSection({ title, description, isOpen, onToggle, status, childre
 
 function flag(value: boolean) {
   return value ? "yes" : "no";
+}
+
+function formatAppearanceStatus(appearanceMode: AppearanceMode, resolvedAppearanceMode: "dark" | "light") {
+  if (appearanceMode === "system") {
+    return `System (${formatAppearanceLabel(resolvedAppearanceMode)})`;
+  }
+
+  return formatAppearanceLabel(appearanceMode);
+}
+
+function formatAppearanceLabel(appearanceMode: "dark" | "light" | "system") {
+  return `${appearanceMode.charAt(0).toUpperCase()}${appearanceMode.slice(1)}`;
 }
 
 function formatRelativeTime(timestamp: string) {

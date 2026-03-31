@@ -10,6 +10,8 @@ const basePlaces: Place[] = [
     neighborhood: "Valley",
     description: "",
     activitySummary: "Low-pressure founder calls.",
+    ownerPubkey: "npub1scout",
+    memberPubkeys: ["npub1scout"],
     tags: ["beacon", "cohort", "curriculum:zero-to-hero", "level:beginner", "hybrid"],
     capacity: 8,
     occupantPubkeys: ["npub1aurora"],
@@ -77,6 +79,10 @@ describe("buildBeaconProjection", () => {
       name: "SFV Founders",
       latestNote: "Week: 1/4\nConcept: Vectors\nNext: Thursday 7pm\nArtifact: Shared notes https://example.com/week-1",
       live: true
+    });
+    expect(projection.threads[0]).toMatchObject({
+      ownerPubkey: "npub1scout",
+      memberPubkeys: ["npub1scout"]
     });
   });
 
