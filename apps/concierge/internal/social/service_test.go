@@ -56,14 +56,24 @@ func TestBootstrap(t *testing.T) {
 		if resp.RelayURL != "wss://test-relay.example" {
 			t.Errorf("expected RelayURL wss://test-relay.example, got %s", resp.RelayURL)
 		}
-		if len(resp.RelayList) != 1 {
-			t.Fatalf("expected one relay list entry, got %d", len(resp.RelayList))
+		if len(resp.RelayList) != 1+len(defaultBootstrapRelays) {
+			t.Fatalf("expected %d relay list entries, got %d", 1+len(defaultBootstrapRelays), len(resp.RelayList))
 		}
 		if resp.RelayList[0].URL != "wss://test-relay.example" {
 			t.Errorf("expected relay list URL wss://test-relay.example, got %s", resp.RelayList[0].URL)
 		}
 		if !resp.RelayList[0].Inbox || !resp.RelayList[0].Outbox {
 			t.Errorf("expected primary relay inbox/outbox flags to default true, got %+v", resp.RelayList[0])
+		}
+		if !slices.ContainsFunc(resp.RelayList, func(entry RelayListEntry) bool {
+			return entry.URL == "wss://relay.damus.io"
+		}) {
+			t.Error("expected featured relay list to include wss://relay.damus.io")
+		}
+		if !slices.ContainsFunc(resp.RelayList, func(entry RelayListEntry) bool {
+			return entry.URL == "wss://cache1.primal.net" && entry.Inbox && !entry.Outbox
+		}) {
+			t.Error("expected specialized relay list to include read-heavy primal cache flags")
 		}
 	})
 
@@ -97,12 +107,6 @@ func TestBootstrap(t *testing.T) {
 		}
 	})
 
-	t.Run("returns feed segments", func(t *testing.T) {
-		if len(resp.FeedSegments) == 0 {
-			t.Error("expected at least one feed segment")
-		}
-	})
-
 	t.Run("returns cross-relay items", func(t *testing.T) {
 		if len(resp.CrossRelayItems) != 0 {
 			t.Errorf("expected no bootstrap cross-relay items, got %d", len(resp.CrossRelayItems))
@@ -123,6 +127,25 @@ func TestBootstrap(t *testing.T) {
 		}
 		if resp2.CrossRelayItems[0].RelayName == "modified relay" {
 			t.Error("Bootstrap should return a copy of cross-relay items, not a reference")
+		}
+	})
+
+	t.Run("deduplicates the primary relay against featured defaults", func(t *testing.T) {
+		damusSvc := NewService("npub1test", "Custom Damus Mirror", "wss://relay.damus.io", nil)
+		damusResp := damusSvc.Bootstrap()
+
+		damusEntries := 0
+		for _, entry := range damusResp.RelayList {
+			if entry.URL == "wss://relay.damus.io" {
+				damusEntries++
+				if entry.Name != "Custom Damus Mirror" {
+					t.Fatalf("expected primary relay label to win during dedupe, got %q", entry.Name)
+				}
+			}
+		}
+
+		if damusEntries != 1 {
+			t.Fatalf("expected deduped relay list to contain one damus entry, got %d", damusEntries)
 		}
 	})
 }

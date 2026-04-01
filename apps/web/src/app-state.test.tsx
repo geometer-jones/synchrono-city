@@ -68,7 +68,6 @@ const bootstrapPayload: BootstrapPayload = {
     }
   ],
   notes: [],
-  feed_segments: [],
   cross_relay_items: []
 };
 
@@ -113,6 +112,9 @@ function Harness() {
       <p>{currentUser.pubkey}</p>
       <p>{activeCall?.transport ?? "idle"}</p>
       <p>{activeCall?.statusMessage ?? "no-status"}</p>
+      <p data-testid="speaking-summary">
+        {activeCall?.participantStates.map((participant) => `${participant.pubkey}:${participant.isSpeaking}`).join(",") ?? "none"}
+      </p>
       <button type="button" onClick={() => joinPlaceCall("9q8yyk")} disabled={!ready}>
         Join room
       </button>
@@ -153,16 +155,105 @@ function NoteActionHarness() {
   );
 }
 
+function FollowHarness() {
+  const { getPlace, isPubkeyFollowed, setPubkeyFollowed } = useAppState();
+  const ready = Boolean(getPlace("9q8yyk"));
+
+  return (
+    <div>
+      <p>{ready ? "ready" : "loading"}</p>
+      <p data-testid="followed-state">{isPubkeyFollowed("npub1aurora") ? "yes" : "no"}</p>
+      <button type="button" onClick={() => setPubkeyFollowed("npub1aurora", true)} disabled={!ready}>
+        Follow Aurora
+      </button>
+      <button type="button" onClick={() => setPubkeyFollowed("npub1aurora", false)} disabled={!ready}>
+        Unfollow Aurora
+      </button>
+    </div>
+  );
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   primeLiveKitMock();
   clearStoredLocalKeyring();
+  if (typeof window.localStorage === "object" && window.localStorage && typeof window.localStorage.clear === "function") {
+    window.localStorage.clear();
+  }
   delete window.nostr;
 });
 
 primeLiveKitMock();
 
 describe("AppStateProvider", () => {
+  it("persists followed pubkeys locally", async () => {
+    const originalLocalStorage = window.localStorage;
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+        clear: () => {
+          storage.clear();
+        }
+      }
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), window.location.origin);
+
+      if (url.pathname === "/api/v1/social/bootstrap") {
+        return jsonResponse(bootstrapPayload);
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+    });
+
+    try {
+      const user = userEvent.setup();
+
+      const firstRender = render(
+        <ToastProvider>
+          <AppStateProvider>
+            <FollowHarness />
+          </AppStateProvider>
+        </ToastProvider>
+      );
+
+      await screen.findByText("ready");
+      expect(screen.getByTestId("followed-state")).toHaveTextContent("no");
+
+      await user.click(screen.getByRole("button", { name: /^follow aurora$/i }));
+      expect(screen.getByTestId("followed-state")).toHaveTextContent("yes");
+      firstRender.unmount();
+
+      render(
+        <ToastProvider>
+          <AppStateProvider>
+            <FollowHarness />
+          </AppStateProvider>
+        </ToastProvider>
+      );
+
+      await screen.findByText("ready");
+      expect(screen.getByTestId("followed-state")).toHaveTextContent("yes");
+
+      await user.click(screen.getByRole("button", { name: /^unfollow aurora$/i }));
+      expect(screen.getByTestId("followed-state")).toHaveTextContent("no");
+    } finally {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: originalLocalStorage
+      });
+    }
+  });
+
   it("invokes the screen share setter once per click in strict mode", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(String(input), window.location.origin);
@@ -226,6 +317,88 @@ describe("AppStateProvider", () => {
       expect(liveKitMocks.session.setScreenShareEnabled).toHaveBeenCalledTimes(1);
     });
     expect(liveKitMocks.session.setScreenShareEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("tracks active speaker state from LiveKit participants", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input), window.location.origin);
+
+      if (url.pathname === "/api/v1/social/bootstrap") {
+        return jsonResponse(bootstrapPayload);
+      }
+
+      if (url.pathname === "/api/v1/token") {
+        const body = JSON.parse(String(init?.body)) as { room_id: string };
+        expect(body.room_id).toBe("beacon:9q8yyk");
+
+        return jsonResponse({
+          decision: "allow",
+          reason: "room_permission",
+          token: {
+            token: "jwt-token",
+            identity: "npub1scout",
+            room_id: "beacon:9q8yyk",
+            livekit_url: "ws://livekit.example.test",
+            expires_at: "2026-03-20T12:10:00Z",
+            grants: {
+              room_join: true,
+              can_publish: true,
+              can_subscribe: true
+            }
+          }
+        });
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+    });
+
+    window.nostr = {
+      getPublicKey: vi.fn(async () => "npub1scout"),
+      signEvent: vi.fn(async (event) => ({ ...event, id: "sig", pubkey: "npub1scout", sig: "sig" }))
+    };
+
+    liveKitMocks.connectLiveKitSessionMock.mockReset();
+    liveKitMocks.connectLiveKitSessionMock.mockImplementation(async (options) => {
+      options.onConnectionStatus("connected", "LiveKit room connected.");
+      options.onParticipantsChanged([
+        {
+          identity: "npub1scout",
+          mic: true,
+          cam: false,
+          screenshare: false,
+          isSpeaking: false,
+          isLocal: true
+        },
+        {
+          identity: "npub1aurora",
+          mic: true,
+          cam: true,
+          screenshare: false,
+          isSpeaking: true,
+          isLocal: false
+        }
+      ]);
+      options.onMediaStreamsChanged([]);
+      return liveKitMocks.session;
+    });
+
+    const user = userEvent.setup();
+
+    render(
+      <ToastProvider>
+        <AppStateProvider>
+          <Harness />
+        </AppStateProvider>
+      </ToastProvider>
+    );
+
+    await screen.findByText("ready");
+    await user.click(screen.getByRole("button", { name: /join room/i }));
+
+    await waitFor(() => expect(screen.getByText("livekit")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("speaking-summary")).toHaveTextContent("npub1aurora:true")
+    );
   });
 
   it("unlocks publish controls after a live permission promotion without requiring rejoin", async () => {
@@ -399,6 +572,82 @@ describe("AppStateProvider", () => {
 
       await waitFor(() => expect(screen.getByText("livekit")).toBeInTheDocument());
       expect(liveKitMocks.connectLiveKitSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: originalLocalStorage
+      });
+    }
+  });
+
+  it("records missing oauth verification on the local key when call access is denied", async () => {
+    const originalLocalStorage = window.localStorage;
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        }
+      }
+    });
+
+    const localKey = importLocalKeyMaterial("1111111111111111111111111111111111111111111111111111111111111111");
+    try {
+      storeLocalKeyring({
+        activePublicKeyNpub: localKey.publicKeyNpub,
+        keys: [localKey]
+      });
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = new URL(String(input), window.location.origin);
+
+        if (url.pathname === "/api/v1/social/bootstrap") {
+          return jsonResponse(bootstrapPayload);
+        }
+
+        if (url.pathname === "/api/v1/token") {
+          const body = JSON.parse(String(init?.body)) as { room_id: string };
+          expect(body.room_id).toBe("beacon:9q8yyk");
+
+          return jsonResponse(
+            {
+              decision: "deny",
+              reason: "required_proof",
+              scope: "media.join",
+              proof_requirement: "oauth",
+              proof_requirement_met: false,
+              gates: [{ type: "oauth", status: "missing" }]
+            },
+            403
+          );
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+      });
+
+      const user = userEvent.setup();
+
+      render(
+        <StrictMode>
+          <ToastProvider>
+            <AppStateProvider>
+              <Harness />
+            </AppStateProvider>
+          </ToastProvider>
+        </StrictMode>
+      );
+
+      await screen.findByText("ready");
+      await user.click(screen.getByRole("button", { name: /join room/i }));
+
+      expect(liveKitMocks.connectLiveKitSessionMock).not.toHaveBeenCalled();
+      expect(await screen.findByText(/call access requires oauth verification/i)).toBeInTheDocument();
+      expect(loadStoredLocalKeyring().keys[0]?.verifications?.oauth?.status).toBe("missing");
     } finally {
       Object.defineProperty(window, "localStorage", {
         configurable: true,

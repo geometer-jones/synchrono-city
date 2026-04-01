@@ -4,6 +4,7 @@ import { NavLink, Outlet, useSearchParams } from "react-router-dom";
 import { AppStateProvider } from "../app-state";
 import { CallOverlay } from "../components/call-overlay";
 import { ErrorBoundary } from "../components/error-boundary";
+import { useNarrowViewport } from "../hooks/use-viewport";
 
 const navItems = [
   { to: "/app", label: "World", end: true },
@@ -11,6 +12,10 @@ const navItems = [
   { to: "/app/pulse", label: "Pulse" },
   { to: "/app/settings", label: "Settings" }
 ];
+
+export type AppShellOutletContext = {
+  mobileChatsResetToken: number;
+};
 
 export function AppShell() {
   return (
@@ -22,7 +27,9 @@ export function AppShell() {
 
 function AppShellLayout() {
   const [searchParams] = useSearchParams();
+  const isNarrowViewport = useNarrowViewport();
   const [rememberedBeaconGeohash, setRememberedBeaconGeohash] = useState(() => searchParams.get("beacon") ?? "");
+  const [mobileChatsResetToken, setMobileChatsResetToken] = useState(0);
 
   useEffect(() => {
     const selectedBeaconGeohash = searchParams.get("beacon");
@@ -32,6 +39,19 @@ function AppShellLayout() {
   }, [searchParams]);
 
   const preservedSearch = rememberedBeaconGeohash ? `?beacon=${encodeURIComponent(rememberedBeaconGeohash)}` : "";
+  const resolveNavSearch = (pathname: string) => {
+    if (isNarrowViewport && (pathname === "/app" || pathname === "/app/chats")) {
+      return "";
+    }
+
+    return preservedSearch;
+  };
+
+  function handleNavItemClick(pathname: string) {
+    if (isNarrowViewport && pathname === "/app/chats") {
+      setMobileChatsResetToken((current) => current + 1);
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -43,7 +63,11 @@ function AppShellLayout() {
           {navItems.map((item) => (
             <NavLink
               key={item.to}
-              to={{ pathname: item.to, search: preservedSearch }}
+              to={{
+                pathname: item.to,
+                search: resolveNavSearch(item.to)
+              }}
+              onClick={() => handleNavItemClick(item.to)}
               end={item.end}
               className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
             >
@@ -55,7 +79,7 @@ function AppShellLayout() {
 
       <main className="content">
         <ErrorBoundary>
-          <Outlet />
+          <Outlet context={{ mobileChatsResetToken } satisfies AppShellOutletContext} />
         </ErrorBoundary>
       </main>
 
@@ -66,7 +90,11 @@ function AppShellLayout() {
           {navItems.map((item) => (
             <NavLink
               key={item.to}
-              to={{ pathname: item.to, search: preservedSearch }}
+              to={{
+                pathname: item.to,
+                search: resolveNavSearch(item.to)
+              }}
+              onClick={() => handleNavItemClick(item.to)}
               end={item.end}
               className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
             >

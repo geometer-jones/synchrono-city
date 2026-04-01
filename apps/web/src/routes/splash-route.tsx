@@ -1,9 +1,16 @@
 import { useNavigate } from "react-router-dom";
 
+import { ensureStoredLocalKeyring } from "../key-manager";
+
 const GITHUB_URL = "https://github.com/geometer-jones/synchrono-city";
 
 export function SplashRoute() {
   const navigate = useNavigate();
+
+  function handleEnterCity() {
+    ensureStoredLocalKeyring();
+    navigate("/app");
+  }
 
   return (
     <section className="splash">
@@ -15,7 +22,7 @@ export function SplashRoute() {
           <h1>Chosen Presence. Sovereign Infrastructure. Portable Community.</h1>
 
           <div className="cta-group">
-            <button className="cta primary" onClick={() => navigate("/app")}>
+            <button className="cta primary" onClick={handleEnterCity}>
               Enter the City
             </button>
             <a

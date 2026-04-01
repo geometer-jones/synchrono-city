@@ -1,10 +1,28 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Link } from "react-router-dom";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 
 import { grantRoomPermission } from "../admin-client";
 import { useAppState } from "../app-state";
+import type { Beacon, BeaconThread } from "../beacon-projection";
 import { ActiveCallMediaStreams } from "../components/call-overlay";
-import { createFallbackParticipantProfile, sortNotesChronologically, type GeoNote, type ParticipantProfile } from "../data";
+import {
+  createFallbackParticipantProfile,
+  isConnectedLiveKitCall,
+  pulseNetworkGeohash,
+  pulseNetworkPlaceTitle,
+  sortNotesChronologically,
+  type GeoNote,
+  type ParticipantProfile
+} from "../data";
+import { useNarrowViewport } from "../hooks/use-viewport";
+import { queryAuthorKindOneNotes, queryProfileMetadata, type ProfileMetadataContent } from "../nostr";
 import { showToast } from "../toast";
 import { CohortBeaconPanel, CohortHostControls } from "./cohort-panels";
 
@@ -30,6 +48,26 @@ type BeaconAvatarProps = {
   className: string;
 };
 
+type ProfileMetadataDialogState = {
+  pubkey: string;
+  status: "loading" | "ready" | "error";
+  metadata: ProfileMetadataContent | null;
+  error: string | null;
+  latestPostsStatus: "loading" | "ready" | "error";
+  latestPosts: GeoNote[];
+  latestPostsError: string | null;
+};
+
+type BeaconDialogState = "people" | "settings" | null;
+
+type BeaconPerson = {
+  pubkey: string;
+  label: string;
+  picture?: string;
+  isOwner: boolean;
+  isLive: boolean;
+};
+
 const relativeDateFilterOptions: Array<{ value: RelativeDateFilter; label: string; longLabel: string }> = [
   { value: "hour", label: "Last hour", longLabel: "Last hour" },
   { value: "day", label: "Day", longLabel: "Last day" },
@@ -49,10 +87,20 @@ const relativeDateFilterWindowMs: Record<Exclude<RelativeDateFilter, "all">, num
 
 const messageGroupWindowMs = 5 * 60 * 1000;
 const maxBeaconChatInputHeightPx = 176;
+const mobileMessageLongPressMs = 450;
+const mobileMessageLongPressCancelDistancePx = 10;
 const emojiReactionOptions = ["👍", "❤️", "😂", "🔥", "🎯"] as const;
 
 function joinClassNames(...classNames: Array<string | undefined>) {
   return classNames.filter(Boolean).join(" ");
+}
+
+function dedupePubkeys(pubkeys: Array<string | undefined>) {
+  return Array.from(new Set(pubkeys.map((pubkey) => pubkey?.trim() ?? "").filter(Boolean)));
+}
+
+function formatCountLabel(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function matchesRelativeDateFilter(note: GeoNote, filter: RelativeDateFilter) {
@@ -140,6 +188,21 @@ function resolveBeaconChatAuthorLabel(author: ParticipantProfile | undefined, pu
   return author?.displayName || author?.name || abbreviateBeaconChatPubkey(pubkey);
 }
 
+function useDialogEscape(onClose: () => void) {
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+}
+
 function isScrolledToBottom(element: HTMLElement) {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
 }
@@ -182,6 +245,7 @@ export function BeaconThreadPanel({
   avatarActionLabel,
   onActivateBeacon
 }: BeaconThreadPanelProps) {
+  const isNarrowViewport = useNarrowViewport();
   const {
     activeCall,
     currentUser,
@@ -190,30 +254,50 @@ export function BeaconThreadPanel({
     getBeaconParticipants,
     getNote,
     getProfile,
+    isPubkeyFollowed,
     joinBeaconCall,
     leaveBeaconCall,
     listBeaconThreads,
     listNotesForBeacon,
     reactToPlaceNote,
-    relayOperatorPubkey
+    relayOperatorPubkey,
+    relayURL,
+    setPubkeyFollowed
   } = useAppState();
 
   const [draftNote, setDraftNote] = useState("");
   const [replyTargetNoteId, setReplyTargetNoteId] = useState<string | null>(null);
   const [openReactionNoteId, setOpenReactionNoteId] = useState<string | null>(null);
+  const [openMessageActionNoteId, setOpenMessageActionNoteId] = useState<string | null>(null);
+  const [openBeaconDialog, setOpenBeaconDialog] = useState<BeaconDialogState>(null);
+  const [profileMetadataDialog, setProfileMetadataDialog] = useState<ProfileMetadataDialogState | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const noteComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const pendingMessageLongPressRef = useRef<{
+    noteId: string;
+    originX: number;
+    originY: number;
+    timeoutId: number;
+  } | null>(null);
   const previousListStateRef = useRef<{ geohash: string; tailNoteId?: string }>({
     geohash: "",
     tailNoteId: undefined
   });
 
   const beacon = getBeacon(beaconGeohash);
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const selectedBeaconThread = listBeaconThreads().find((thread) => thread.geohash === beaconGeohash);
   const selectedPinnedNote = beacon?.pinnedNoteId ? getNote(beacon.pinnedNoteId) : undefined;
   const selectedPinnedAuthor = selectedPinnedNote ? getProfile(selectedPinnedNote.authorPubkey) : undefined;
   const selectedParticipants = beacon ? getBeaconParticipants(beacon.geohash) : [];
+  const explicitMemberPubkeys = dedupePubkeys([
+    selectedBeaconThread?.ownerPubkey,
+    ...(selectedBeaconThread?.memberPubkeys ?? [])
+  ]);
+  const fallbackPeoplePubkeys = dedupePubkeys(selectedParticipants.map((participant) => participant.pubkey));
+  const beaconPeoplePubkeys = explicitMemberPubkeys.length > 0 ? explicitMemberPubkeys : fallbackPeoplePubkeys;
+  const beaconPeopleUsesLiveFallback = explicitMemberPubkeys.length === 0 && beaconPeoplePubkeys.length > 0;
   const selectedNotes = listNotesForBeacon(beaconGeohash).filter((note) =>
     matchesRelativeDateFilter(note, relativeDateFilter)
   );
@@ -222,16 +306,61 @@ export function BeaconThreadPanel({
   const tailNoteId = orderedNotes.at(-1)?.id;
   const replyTargetNote = replyTargetNoteId ? getNote(replyTargetNoteId) : undefined;
   const replyTargetAuthor = replyTargetNote ? getProfile(replyTargetNote.authorPubkey) : undefined;
+  const selectedMetadataPubkey = profileMetadataDialog?.pubkey ?? null;
+  const selectedMetadataAuthor = selectedMetadataPubkey ? getProfile(selectedMetadataPubkey) : undefined;
+  const canFollowSelectedMetadata = Boolean(
+    selectedMetadataPubkey && selectedMetadataPubkey.trim() !== currentUser.pubkey.trim()
+  );
+  const isSelectedMetadataFollowed = selectedMetadataPubkey ? isPubkeyFollowed(selectedMetadataPubkey) : false;
   const isRelayOperator = currentUser.pubkey === relayOperatorPubkey;
-  const isSelectedBeaconInActiveCall = Boolean(beacon && activeCall?.geohash === beacon.geohash);
+  const isSelectedBeaconInActiveCall = Boolean(beacon && connectedActiveCall?.geohash === beacon.geohash);
   const selectedBeaconActiveRoomID =
-    beacon && activeCall?.geohash === beacon.geohash ? activeCall.roomID : beacon?.roomID;
+    beacon && connectedActiveCall?.geohash === beacon.geohash ? connectedActiveCall.roomID : beacon?.roomID;
+  const liveParticipantPubkeys = new Set([
+    ...selectedParticipants.map((participant) => participant.pubkey),
+    ...(beacon && connectedActiveCall?.geohash === beacon.geohash
+      ? connectedActiveCall.participantStates.map((participant) => participant.pubkey)
+      : [])
+  ]);
+  const beaconPeople = beaconPeoplePubkeys
+    .map<BeaconPerson>((pubkey) => {
+      const participant = selectedParticipants.find((candidate) => candidate.pubkey === pubkey);
+      const profile = getProfile(pubkey) ?? participant ?? createFallbackParticipantProfile(pubkey);
+      const label = resolveBeaconChatAuthorLabel(profile, pubkey);
+      const isOwner = selectedBeaconThread?.ownerPubkey?.trim() === pubkey;
+
+      return {
+        pubkey,
+        label,
+        picture: profile.picture,
+        isOwner,
+        isLive: liveParticipantPubkeys.has(pubkey)
+      };
+    })
+    .sort((left, right) => {
+      if (left.isOwner !== right.isOwner) {
+        return left.isOwner ? -1 : 1;
+      }
+
+      return left.label.localeCompare(right.label);
+    });
+  const beaconOwner = beaconPeople.find((person) => person.isOwner);
   const connectedRoomParticipants =
-    beacon && activeCall?.geohash === beacon.geohash
-      ? activeCall.participantStates
+    beacon && connectedActiveCall?.geohash === beacon.geohash
+      ? connectedActiveCall.participantStates
           .filter((participant) => participant.pubkey !== currentUser.pubkey)
           .map((participant) => getProfile(participant.pubkey) ?? createFallbackParticipantProfile(participant.pubkey))
       : [];
+
+  function clearPendingMessageLongPress() {
+    const pendingLongPress = pendingMessageLongPressRef.current;
+    if (!pendingLongPress) {
+      return;
+    }
+
+    window.clearTimeout(pendingLongPress.timeoutId);
+    pendingMessageLongPressRef.current = null;
+  }
 
   function handleSubmitNote() {
     if (!beaconGeohash) {
@@ -245,10 +374,11 @@ export function BeaconThreadPanel({
       setDraftNote("");
       setReplyTargetNoteId(null);
       setOpenReactionNoteId(null);
+      setOpenMessageActionNoteId(null);
     }
   }
 
-  function handleNoteComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleNoteComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
       return;
     }
@@ -265,16 +395,71 @@ export function BeaconThreadPanel({
 
     setReplyTargetNoteId((current) => (current === message.id ? null : message.id));
     setOpenReactionNoteId(null);
+    setOpenMessageActionNoteId(null);
     noteComposerRef.current?.focus();
   }
 
   function handleToggleReactionPicker(messageID: string) {
     setOpenReactionNoteId((current) => (current === messageID ? null : messageID));
+    if (isNarrowViewport) {
+      setOpenMessageActionNoteId(messageID);
+    }
   }
 
   function handleReactToMessage(message: GeoNote, emoji: string) {
     reactToPlaceNote(message.id, emoji);
     setOpenReactionNoteId(null);
+    setOpenMessageActionNoteId(null);
+  }
+
+  function handleMessagePointerDown(messageID: string, event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isNarrowViewport || (event.pointerType === "mouse" && event.button !== 0)) {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    if (target.closest(".world-chat-message-actions, .world-chat-reaction-picker")) {
+      return;
+    }
+
+    clearPendingMessageLongPress();
+    pendingMessageLongPressRef.current = {
+      noteId: messageID,
+      originX: event.clientX,
+      originY: event.clientY,
+      timeoutId: window.setTimeout(() => {
+        setOpenReactionNoteId((current) => (current && current !== messageID ? null : current));
+        setOpenMessageActionNoteId((current) => (current === messageID ? null : messageID));
+        pendingMessageLongPressRef.current = null;
+      }, mobileMessageLongPressMs)
+    };
+  }
+
+  function handleMessagePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const pendingLongPress = pendingMessageLongPressRef.current;
+    if (!pendingLongPress) {
+      return;
+    }
+
+    if (
+      pendingLongPress.noteId !== event.currentTarget.dataset.noteId ||
+      Math.abs(event.clientX - pendingLongPress.originX) > mobileMessageLongPressCancelDistancePx ||
+      Math.abs(event.clientY - pendingLongPress.originY) > mobileMessageLongPressCancelDistancePx
+    ) {
+      clearPendingMessageLongPress();
+    }
+  }
+
+  function handleOpenProfileMetadata(pubkey: string) {
+    setProfileMetadataDialog({
+      pubkey,
+      status: "loading",
+      metadata: null,
+      error: null,
+      latestPostsStatus: "loading",
+      latestPosts: [],
+      latestPostsError: null
+    });
   }
 
   async function handleSetParticipantSpeakerMode(pubkey: string, mode: "speaker" | "listener") {
@@ -337,7 +522,109 @@ export function BeaconThreadPanel({
   useEffect(() => {
     setReplyTargetNoteId(null);
     setOpenReactionNoteId(null);
+    setOpenMessageActionNoteId(null);
+    setOpenBeaconDialog(null);
+    clearPendingMessageLongPress();
   }, [beaconGeohash]);
+
+  useEffect(() => {
+    if (!isNarrowViewport) {
+      clearPendingMessageLongPress();
+      setOpenMessageActionNoteId(null);
+    }
+  }, [isNarrowViewport]);
+
+  useEffect(() => {
+    return () => {
+      clearPendingMessageLongPress();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedMetadataPubkey) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void queryProfileMetadata(relayURL, [selectedMetadataPubkey])
+      .then((metadataByPubkey) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProfileMetadataDialog((current) =>
+          current && current.pubkey === selectedMetadataPubkey
+            ? {
+                pubkey: selectedMetadataPubkey,
+                status: "ready",
+                metadata: metadataByPubkey.get(selectedMetadataPubkey) ?? null,
+                error: null,
+                latestPostsStatus: current.latestPostsStatus,
+                latestPosts: current.latestPosts,
+                latestPostsError: current.latestPostsError
+              }
+            : current
+        );
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProfileMetadataDialog((current) =>
+          current && current.pubkey === selectedMetadataPubkey
+            ? {
+                pubkey: selectedMetadataPubkey,
+                status: "error",
+                metadata: null,
+                error: error instanceof Error ? error.message : "Unable to load kind 0 metadata.",
+                latestPostsStatus: current.latestPostsStatus,
+                latestPosts: current.latestPosts,
+                latestPostsError: current.latestPostsError
+              }
+            : current
+        );
+      });
+
+    void queryAuthorKindOneNotes(relayURL, selectedMetadataPubkey, { limit: 3 })
+      .then((latestPosts) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProfileMetadataDialog((current) =>
+          current && current.pubkey === selectedMetadataPubkey
+            ? {
+                ...current,
+                latestPostsStatus: "ready",
+                latestPosts,
+                latestPostsError: null
+              }
+            : current
+        );
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProfileMetadataDialog((current) =>
+          current && current.pubkey === selectedMetadataPubkey
+            ? {
+                ...current,
+                latestPostsStatus: "error",
+                latestPosts: [],
+                latestPostsError: error instanceof Error ? error.message : "Unable to load recent kind 1 posts."
+              }
+            : current
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [relayURL, selectedMetadataPubkey]);
 
   if (!beacon) {
     return null;
@@ -362,16 +649,28 @@ export function BeaconThreadPanel({
           </button>
         </div>
         <div className="world-chat-header-actions">
-          <Link
+          <button
+            className="call-control-button world-chat-people-button"
+            type="button"
+            aria-label="Open people"
+            title="Open people"
+            onClick={() => setOpenBeaconDialog("people")}
+          >
+            <span className="call-control-icon" aria-hidden="true">
+              <PeopleIcon />
+            </span>
+          </button>
+          <button
             className="call-control-button world-chat-settings-button"
-            to="/app/settings"
-            aria-label="Open settings"
-            title="Open settings"
+            type="button"
+            aria-label="Open beacon settings"
+            title="Open beacon settings"
+            onClick={() => setOpenBeaconDialog("settings")}
           >
             <span className="call-control-icon" aria-hidden="true">
               <SettingsIcon />
             </span>
-          </Link>
+          </button>
           <button
             className={
               isSelectedBeaconInActiveCall
@@ -417,6 +716,7 @@ export function BeaconThreadPanel({
         ref={messageListRef}
         className="note-list world-chat-messages"
         onScroll={(event) => {
+          clearPendingMessageLongPress();
           shouldStickToBottomRef.current = isScrolledToBottom(event.currentTarget);
         }}
       >
@@ -434,9 +734,10 @@ export function BeaconThreadPanel({
           return (
             <article key={firstMessage.id} className="world-chat-message-group">
               <header className="world-chat-message-group-header">
-                <Link
+                <button
                   className="world-chat-message-author world-chat-message-author-link"
-                  to={`/app/pulse?profile=${encodeURIComponent(group.authorPubkey)}`}
+                  type="button"
+                  onClick={() => handleOpenProfileMetadata(group.authorPubkey)}
                 >
                   <BeaconAvatar
                     picture={author?.picture}
@@ -448,7 +749,7 @@ export function BeaconThreadPanel({
                     <strong>{authorLabel}</strong>
                     <p className="tile-kicker">{abbreviateBeaconChatPubkey(group.authorPubkey)}</p>
                   </div>
-                </Link>
+                </button>
                 <div className="world-chat-message-meta">
                   <p className="tile-kicker">{formatRelativeTime(firstMessage.createdAt)}</p>
                 </div>
@@ -464,13 +765,23 @@ export function BeaconThreadPanel({
                     const repliedToLabel = repliedToNote
                       ? resolveBeaconChatAuthorLabel(repliedToAuthor, repliedToNote.authorPubkey)
                       : "earlier message";
+                    const isMessageActionOpen = openMessageActionNoteId === message.id || openReactionNoteId === message.id;
 
                     return (
                       <div
                         key={message.id}
-                        className={index === 0 ? "world-chat-message" : "world-chat-message is-grouped"}
+                        className={joinClassNames(
+                          index === 0 ? "world-chat-message" : "world-chat-message is-grouped",
+                          isMessageActionOpen ? "is-actions-open" : undefined
+                        )}
                         title={index === 0 ? undefined : formatAbsoluteTime(message.createdAt)}
                         tabIndex={0}
+                        data-note-id={message.id}
+                        onPointerDown={(event) => handleMessagePointerDown(message.id, event)}
+                        onPointerMove={handleMessagePointerMove}
+                        onPointerUp={clearPendingMessageLongPress}
+                        onPointerCancel={clearPendingMessageLongPress}
+                        onPointerLeave={clearPendingMessageLongPress}
                       >
                         <div className="world-chat-message-content">
                           {message.replyTargetId ? (
@@ -565,6 +876,373 @@ export function BeaconThreadPanel({
           rows={1}
         />
       </form>
+
+      {profileMetadataDialog ? (
+        <ProfileMetadataDialog
+          author={selectedMetadataAuthor}
+          dialogState={profileMetadataDialog}
+          canFollow={canFollowSelectedMetadata}
+          isFollowed={isSelectedMetadataFollowed}
+          onToggleFollow={() => {
+            if (!selectedMetadataPubkey) {
+              return;
+            }
+
+            setPubkeyFollowed(selectedMetadataPubkey, !isSelectedMetadataFollowed);
+          }}
+          onClose={() => setProfileMetadataDialog(null)}
+        />
+      ) : null}
+      {openBeaconDialog === "people" ? (
+        <BeaconPeopleDialog
+          beacon={beacon}
+          people={beaconPeople}
+          usingLiveFallback={beaconPeopleUsesLiveFallback}
+          onClose={() => setOpenBeaconDialog(null)}
+        />
+      ) : null}
+      {openBeaconDialog === "settings" ? (
+        <BeaconSettingsDialog
+          beacon={beacon}
+          thread={selectedBeaconThread}
+          owner={beaconOwner}
+          pinnedNote={selectedPinnedNote}
+          peopleCount={beaconPeople.length}
+          usingLiveFallback={beaconPeopleUsesLiveFallback}
+          liveParticipantCount={selectedParticipants.length}
+          onClose={() => setOpenBeaconDialog(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+type ProfileMetadataDialogProps = {
+  author?: ParticipantProfile;
+  dialogState: ProfileMetadataDialogState;
+  canFollow: boolean;
+  isFollowed: boolean;
+  onToggleFollow: () => void;
+  onClose: () => void;
+};
+
+function ProfileMetadataDialog({
+  author,
+  dialogState,
+  canFollow,
+  isFollowed,
+  onToggleFollow,
+  onClose
+}: ProfileMetadataDialogProps) {
+  const authorLabel = resolveBeaconChatAuthorLabel(author, dialogState.pubkey);
+  const metadataJSON = dialogState.metadata ? JSON.stringify(dialogState.metadata, null, 2) : null;
+
+  useDialogEscape(onClose);
+
+  return (
+    <div className="profile-metadata-dialog-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="profile-metadata-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-metadata-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="detail-header profile-metadata-dialog-header">
+          <div className="profile-metadata-dialog-identity">
+            <BeaconAvatar
+              picture={author?.picture}
+              label={authorLabel}
+              fallbackLabel={authorLabel}
+              className="participant-avatar"
+            />
+            <div className="marker-participant-meta">
+              <h3 id="profile-metadata-title">{authorLabel}</h3>
+              <p className="tile-kicker">{dialogState.pubkey}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="profile-metadata-dialog-body">
+          {canFollow ? (
+            <div className="action-row profile-metadata-dialog-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                aria-pressed={isFollowed}
+                onClick={onToggleFollow}
+              >
+                {isFollowed ? "Following" : "Follow"}
+              </button>
+            </div>
+          ) : null}
+
+          {dialogState.status === "loading" ? (
+            <p className="muted">Loading kind 0 metadata from the current relay.</p>
+          ) : null}
+
+          {dialogState.status === "error" ? (
+            <p className="muted">{dialogState.error ?? "Unable to load kind 0 metadata."}</p>
+          ) : null}
+
+          {dialogState.status === "ready" && !dialogState.metadata ? (
+            <p className="muted">No kind 0 metadata found for this pubkey on the current relay.</p>
+          ) : null}
+
+          {dialogState.status === "ready" && dialogState.metadata ? (
+            <>
+              <div className="profile-metadata-dialog-grid">
+                {typeof dialogState.metadata.name === "string" && dialogState.metadata.name.trim() ? (
+                  <article className="mini-card">
+                    <strong>Name</strong>
+                    <p>{dialogState.metadata.name}</p>
+                  </article>
+                ) : null}
+                {typeof dialogState.metadata.picture === "string" && dialogState.metadata.picture.trim() ? (
+                  <article className="mini-card">
+                    <strong>Picture</strong>
+                    <p>{dialogState.metadata.picture}</p>
+                  </article>
+                ) : null}
+                {typeof dialogState.metadata.about === "string" && dialogState.metadata.about.trim() ? (
+                  <article className="mini-card">
+                    <strong>About</strong>
+                    <p>{dialogState.metadata.about}</p>
+                  </article>
+                ) : null}
+              </div>
+              <pre className="profile-metadata-dialog-json">{metadataJSON}</pre>
+            </>
+          ) : null}
+
+          <section className="profile-metadata-dialog-posts">
+            <div className="detail-header">
+              <div>
+                <h4>Latest kind 1 posts</h4>
+              </div>
+            </div>
+
+            {dialogState.latestPostsStatus === "loading" ? (
+              <p className="muted">Loading latest kind 1 posts from the current relay.</p>
+            ) : null}
+
+            {dialogState.latestPostsStatus === "error" ? (
+              <p className="muted">{dialogState.latestPostsError ?? "Unable to load recent kind 1 posts."}</p>
+            ) : null}
+
+            {dialogState.latestPostsStatus === "ready" && dialogState.latestPosts.length === 0 ? (
+              <p className="muted">No recent kind 1 posts found for this pubkey on the current relay.</p>
+            ) : null}
+
+            {dialogState.latestPostsStatus === "ready" && dialogState.latestPosts.length > 0 ? (
+              <div className="note-list">
+                {dialogState.latestPosts.map((post) => (
+                  <article key={post.id} className="mini-card">
+                    <p>{post.content}</p>
+                    <small>
+                      {formatRelativeTime(post.createdAt)} ·{" "}
+                      {post.geohash === pulseNetworkGeohash ? pulseNetworkPlaceTitle : post.geohash}
+                    </small>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type BeaconPeopleDialogProps = {
+  beacon: Beacon;
+  people: BeaconPerson[];
+  usingLiveFallback: boolean;
+  onClose: () => void;
+};
+
+function BeaconPeopleDialog({ beacon, people, usingLiveFallback, onClose }: BeaconPeopleDialogProps) {
+  useDialogEscape(onClose);
+
+  return (
+    <div className="thread-modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="thread-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="beacon-people-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="detail-header thread-modal-header">
+          <div className="thread-modal-identity">
+            <BeaconAvatar
+              picture={beacon.avatarUrl}
+              label={beacon.name}
+              fallbackLabel={beacon.name}
+              className="beacon-avatar-large"
+            />
+            <div className="marker-participant-meta">
+              <p className="section-label">People</p>
+              <h3 id="beacon-people-title">People in {beacon.name}</h3>
+              <p className="tile-kicker">{beacon.geohash}</p>
+            </div>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="thread-modal-body">
+          <p className="muted">
+            {usingLiveFallback
+              ? "No explicit member roster is published for this beacon yet. Showing the people currently present."
+              : `${formatCountLabel(people.length, "person", "people")} in this beacon.`}
+          </p>
+
+          {people.length > 0 ? (
+            <ul className="beacon-people-list">
+              {people.map((person) => (
+                <li key={person.pubkey} className="mini-card beacon-person-row">
+                  <div className="beacon-person-identity">
+                    <BeaconAvatar
+                      picture={person.picture}
+                      label={person.label}
+                      fallbackLabel={person.label}
+                      className="participant-avatar"
+                    />
+                    <div className="beacon-person-copy">
+                      <strong>{person.label}</strong>
+                      <p className="tile-kicker">{person.pubkey}</p>
+                    </div>
+                  </div>
+                  <div className="beacon-person-pills">
+                    {person.isOwner ? <span className="thread-pill">Owner</span> : null}
+                    {!usingLiveFallback && !person.isOwner ? <span className="thread-pill">Member</span> : null}
+                    {person.isLive ? <span className="thread-pill live">Live</span> : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">No beacon members are listed yet.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type BeaconSettingsDialogProps = {
+  beacon: Beacon;
+  thread?: BeaconThread;
+  owner?: BeaconPerson;
+  pinnedNote?: GeoNote;
+  peopleCount: number;
+  usingLiveFallback: boolean;
+  liveParticipantCount: number;
+  onClose: () => void;
+};
+
+function BeaconSettingsDialog({
+  beacon,
+  thread,
+  owner,
+  pinnedNote,
+  peopleCount,
+  usingLiveFallback,
+  liveParticipantCount,
+  onClose
+}: BeaconSettingsDialogProps) {
+  useDialogEscape(onClose);
+
+  return (
+    <div className="thread-modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="thread-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="beacon-settings-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="detail-header thread-modal-header">
+          <div className="thread-modal-identity">
+            <BeaconAvatar
+              picture={beacon.avatarUrl}
+              label={beacon.name}
+              fallbackLabel={beacon.name}
+              className="beacon-avatar-large"
+            />
+            <div className="marker-participant-meta">
+              <p className="section-label">Beacon settings</p>
+              <h3 id="beacon-settings-title">Beacon settings for {beacon.name}</h3>
+              <p className="tile-kicker">{beacon.geohash}</p>
+            </div>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="thread-modal-body">
+          <div className="beacon-settings-grid">
+            <article className="mini-card">
+              <strong>Name</strong>
+              <p>{beacon.name}</p>
+            </article>
+            <article className="mini-card">
+              <strong>Geohash</strong>
+              <p>{beacon.geohash}</p>
+            </article>
+            <article className="mini-card">
+              <strong>Room</strong>
+              <p>{beacon.roomID}</p>
+            </article>
+            <article className="mini-card">
+              <strong>People</strong>
+              <p>{formatCountLabel(peopleCount, "person", "people")}</p>
+              <small>{usingLiveFallback ? "Live participants" : "Published member roster"}</small>
+            </article>
+            <article className="mini-card">
+              <strong>Live now</strong>
+              <p>{formatCountLabel(liveParticipantCount, "person", "people")}</p>
+            </article>
+            <article className="mini-card">
+              <strong>Messages</strong>
+              <p>{formatCountLabel(thread?.noteCount ?? 0, "message")}</p>
+            </article>
+            {owner ? (
+              <article className="mini-card">
+                <strong>Owner</strong>
+                <p>{owner.label}</p>
+                <small>{owner.pubkey}</small>
+              </article>
+            ) : null}
+            {thread?.createdAt ? (
+              <article className="mini-card">
+                <strong>Created</strong>
+                <p>{formatAbsoluteTime(thread.createdAt)}</p>
+              </article>
+            ) : null}
+          </div>
+
+          <article className="mini-card beacon-settings-panel">
+            <strong>About</strong>
+            <p>{beacon.about}</p>
+          </article>
+
+          <article className="mini-card beacon-settings-panel">
+            <strong>Pinned note</strong>
+            <p>{pinnedNote ? truncateReplyPreview(pinnedNote.content, 160) : "No pinned note set."}</p>
+          </article>
+
+          {beacon.cohort ? (
+            <article className="mini-card beacon-settings-panel">
+              <strong>Cohort mode</strong>
+              <p>{beacon.cohort.summary}</p>
+            </article>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }
@@ -611,6 +1289,17 @@ function SettingsIcon() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3.2" />
       <path d="M19.4 15a1.5 1.5 0 0 0 .3 1.65l.05.05a1.8 1.8 0 0 1 0 2.55 1.8 1.8 0 0 1-2.55 0l-.05-.05a1.5 1.5 0 0 0-1.65-.3 1.5 1.5 0 0 0-.9 1.37V20.5a1.8 1.8 0 0 1-1.8 1.8 1.8 1.8 0 0 1-1.8-1.8v-.08a1.5 1.5 0 0 0-.97-1.4 1.5 1.5 0 0 0-1.65.3l-.05.05a1.8 1.8 0 0 1-2.55 0 1.8 1.8 0 0 1 0-2.55l.05-.05a1.5 1.5 0 0 0 .3-1.65 1.5 1.5 0 0 0-1.37-.9H3.5a1.8 1.8 0 0 1-1.8-1.8 1.8 1.8 0 0 1 1.8-1.8h.08a1.5 1.5 0 0 0 1.4-.97 1.5 1.5 0 0 0-.3-1.65l-.05-.05a1.8 1.8 0 0 1 0-2.55 1.8 1.8 0 0 1 2.55 0l.05.05a1.5 1.5 0 0 0 1.65.3h.07a1.5 1.5 0 0 0 .83-1.37V3.5a1.8 1.8 0 0 1 1.8-1.8 1.8 1.8 0 0 1 1.8 1.8v.08a1.5 1.5 0 0 0 .9 1.37 1.5 1.5 0 0 0 1.65-.3l.05-.05a1.8 1.8 0 0 1 2.55 0 1.8 1.8 0 0 1 0 2.55l-.05.05a1.5 1.5 0 0 0-.3 1.65v.07a1.5 1.5 0 0 0 1.37.83h.08a1.8 1.8 0 0 1 1.8 1.8 1.8 1.8 0 0 1-1.8 1.8h-.08a1.5 1.5 0 0 0-1.37.9Z" />
+    </svg>
+  );
+}
+
+function PeopleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   );
 }

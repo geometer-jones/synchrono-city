@@ -1,6 +1,5 @@
 import type {
   CrossRelayFeedItem,
-  FeedSegment,
   GeoNote,
   GeoNoteReaction,
   ParticipantProfile,
@@ -14,7 +13,6 @@ export type BootstrapPayload = {
   current_user_pubkey?: string;
   relay_url?: string;
   relay_list?: RelayListEntry[];
-  feed_segments?: FeedSegment[];
   cross_relay_items?: CrossRelayFeedItem[];
   places?: Place[];
   profiles?: ParticipantProfile[];
@@ -69,6 +67,10 @@ function asBoolean(value: unknown) {
 
 function asNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asOptionalNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function pickValue(record: unknown, ...keys: string[]) {
@@ -170,13 +172,6 @@ export function isValidGeoNote(note: GeoNote) {
   return note.id.length > 0 && note.geohash.length > 0 && note.authorPubkey.length > 0;
 }
 
-function normalizeFeedSegment(segment: FeedSegment): FeedSegment {
-  return {
-    name: asString(segment?.name),
-    description: asString(segment?.description)
-  };
-}
-
 function normalizeCrossRelayItem(item: CrossRelayFeedItem): CrossRelayFeedItem {
   return {
     id: asString(pickValue(item, "id")),
@@ -189,7 +184,11 @@ function normalizeCrossRelayItem(item: CrossRelayFeedItem): CrossRelayFeedItem {
     content: asString(pickValue(item, "content")),
     publishedAt: asString(pickValue(item, "publishedAt", "published_at")),
     sourceLabel: asString(pickValue(item, "sourceLabel", "source_label")),
-    whyVisible: asString(pickValue(item, "whyVisible", "why_visible"))
+    whyVisible: asString(pickValue(item, "whyVisible", "why_visible")),
+    zapCount: asOptionalNumber(pickValue(item, "zapCount", "zap_count")),
+    engagementScore: asOptionalNumber(pickValue(item, "engagementScore", "engagement_score")),
+    followGraphScore: asOptionalNumber(pickValue(item, "followGraphScore", "follow_graph_score")),
+    followerCount: asOptionalNumber(pickValue(item, "followerCount", "follower_count"))
   };
 }
 
@@ -219,9 +218,6 @@ function filterWithLogging<T>(
 }
 
 export function normalizeBootstrapPayload(payload: BootstrapPayload) {
-  const rawFeedSegments = Array.isArray(payload.feed_segments)
-    ? payload.feed_segments.map(normalizeFeedSegment)
-    : [];
   const rawRelayList = Array.isArray(payload.relay_list) ? payload.relay_list.map(normalizeRelayListEntry) : [];
   const rawCrossRelayItems = Array.isArray(payload.cross_relay_items)
     ? payload.cross_relay_items.map(normalizeCrossRelayItem)
@@ -238,7 +234,6 @@ export function normalizeBootstrapPayload(payload: BootstrapPayload) {
     current_user_pubkey: asString(payload.current_user_pubkey),
     relay_url: payload.relay_url,
     relay_list: filterWithLogging(rawRelayList, (relay) => relay.url.length > 0, "relay_list_entry"),
-    feed_segments: filterWithLogging(rawFeedSegments, (s) => s.name.length > 0, "feed_segment"),
     cross_relay_items: filterWithLogging(rawCrossRelayItems, (i) => i.id.length > 0, "cross_relay_item"),
     places: filterWithLogging(rawPlaces, (p) => p.geohash.length > 0, "place"),
     profiles: filterWithLogging(rawProfiles, (p) => p.pubkey.length > 0, "profile"),

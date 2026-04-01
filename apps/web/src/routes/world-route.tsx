@@ -1,13 +1,13 @@
-import { useEffect, useEffectEvent, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useEffectEvent, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { MapPreview } from "../components/map-preview";
 import { ResizablePanels } from "../components/resizable-panels";
 import { useAppState } from "../app-state";
 import { buildBeaconMapSearch, createBeaconMapFocusKey, readBeaconMapFocusKey } from "../beacon-map-focus";
-import type { GeoNote } from "../data";
+import { isConnectedLiveKitCall, type GeoNote } from "../data";
 import { useNarrowViewport } from "../hooks/use-viewport";
-import { BeaconAvatar, BeaconThreadPanel, type RelativeDateFilter } from "./beacon-thread-panel";
+import { BeaconThreadPanel, type RelativeDateFilter } from "./beacon-thread-panel";
 
 type PendingBeaconDraft = {
   geohash: string;
@@ -32,40 +32,49 @@ const relativeDateFilterWindowMs: Record<Exclude<RelativeDateFilter, "all">, num
 const defaultDesktopWorldSplitRatio = 0.5;
 const worldBeaconExplainer =
   "A beacon anchors an online community to a geolocation. As a beacon admin, you will be able to delete posts, kick users, and appoint mods within your beacon.";
-const worldManifestoIntro =
-  "Amid exploding sovereign debt, the relentless advance of AI, fresh wars in the Middle East, the lingering fractures of pandemic response, and the deep erosion of public trust laid bare by institutional scandals, the old centralized systems are visibly straining. Platforms that once promised connection now flood us with synthetic noise. Institutions that once claimed legitimacy increasingly reveal capture and fragility. In this moment of abundance and instability, real value shifts back to what cannot be endlessly replicated: embodied human connection in physical places, built and governed by the people who actually inhabit them.";
-const worldManifestoSummary =
-  "These principles outline a new foundation for social technology: one that turns digital signals into durable real-world publics, prioritizes sovereignty over surveillance, and equips local stewards to endure when distant powers falter.";
-const worldManifestoPrinciples = [
+const worldOverviewParagraphs = [
+  "synchrono.city is an open source stack that establishes a standard for bundling these open source protocols together.",
+  "The client serves as a relay manager as well, if you decide to operate your own relay.",
+  "Avoid online serfdom, hold your own keys, host your own relay."
+] as const;
+const worldStackItems = [
   {
-    title: "1. Human connection is the scarce good",
-    body: "In a world of infinite synthetic content, real value comes from repeated in-person encounters. The system turns online signals into actual meetups, shared rituals, and durable relationships."
+    label: "Nostr",
+    title: "Nostr",
+    description:
+      "Nostr lets you store your social data across multiple backends instead of trapping your identity, notes, and follows inside one company database. That matters because durability, portability, and censorship resistance only get real when your data can survive a single host failing or turning hostile. To make that work, Nostr relies on public key cryptography: your private key signs what you publish, your public key identifies you to everyone else, and other clients can verify that your data actually came from you. Once you understand the keypair, the obvious next move is to host your own relay so your social presence is not downstream of somebody else's server policy.",
+    links: [
+      { label: "Protocol", href: "https://github.com/nostr-protocol/nostr" },
+      { label: "Guide", href: "https://nostr.org" }
+    ]
   },
   {
-    title: "2. Place is a first-class social primitive",
-    body: "Neighborhoods, venues, routes, and corners are the substrate of publics. Beacons make geography an active coordination layer for social life."
+    label: "LiveKit",
+    title: "LiveKit",
+    description:
+      "LiveKit provides the realtime voice and video layer. It turns a beacon from a text thread into a place where people can actually drop in, talk, and hang out.",
+    links: [
+      { label: "Website", href: "https://livekit.com" },
+      { label: "GitHub", href: "https://github.com/livekit/livekit" }
+    ]
   },
   {
-    title: "3. Presence must be chosen and intentional",
-    body: "Presence is explicit, reversible, purpose-bound, and privacy-preserving. People decide when they are discoverable, never extracted through continuous tracking."
+    label: "Blossom",
+    title: "Blossom",
+    description:
+      "Blossom stores uploaded media. It gives the stack a simple way to attach images and files to social context without hiding the storage layer behind a proprietary app.",
+    links: [{ label: "Spec", href: "https://github.com/hzrd149/blossom" }]
   },
   {
-    title: "4. Sovereignty begins with ownership of identity, memory, and infrastructure",
-    body: "Portable keys, portable records, and self-hostable components are the basis of continuity when platforms fail."
-  },
-  {
-    title: "5. Governance must be self-sovereign and sustainable",
-    body: "Communities own the rules and roles they can inspect, enforce, and carry with them. Reliable stewardship requires aligned incentives that support local operators without extraction or central control."
-  },
-  {
-    title: "6. AI creates leverage, not legitimacy",
-    body: "AI lowers the cost of matching, organizing, and sustaining connection, but never becomes the intermediary or replaces the relationships it enables."
-  },
-  {
-    title: "7. Success is measured in real-world publics",
-    body: "Adoption grows through low friction and visible fruit: durable relationships, thriving scenes, and resilient neighborhoods that outlast any single point of failure."
+    label: "Concierge",
+    title: "Concierge",
+    description:
+      "Concierge is synchrono.city's contribution to the stack. Its role is to assist relay operators and relay users by handling relay-local policy, permissions, moderation, and the glue code that ties identity, media, calls, and map-native social behavior into one hostable system.",
+    links: [{ label: "GitHub", href: "https://github.com/geometer-jones/synchrono-city" }]
   }
 ] as const;
+
+type StackExplainer = (typeof worldStackItems)[number];
 
 function matchesRelativeDateFilter(note: GeoNote, filter: RelativeDateFilter) {
   if (filter === "all") {
@@ -117,6 +126,7 @@ export function WorldRoute() {
   const [isNarrowBeaconOpen, setIsNarrowBeaconOpen] = useState(false);
   const [pendingBeacon, setPendingBeacon] = useState<PendingBeaconDraft | null>(null);
   const [callTimerNow, setCallTimerNow] = useState(() => Date.now());
+  const [openStackExplainer, setOpenStackExplainer] = useState<StackExplainer | null>(null);
   const {
     activeCall,
     createBeacon,
@@ -144,20 +154,45 @@ export function WorldRoute() {
   const selectedBeaconGeohash = searchParams.get("beacon") ?? "";
   const mapFocusKey = readBeaconMapFocusKey(searchParams);
   const selectedBeacon = selectedBeaconGeohash ? getBeacon(selectedBeaconGeohash) : undefined;
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const isCreationSheetVisible = Boolean(pendingBeacon);
   // Keep the desktop chat rail mounted while the pending beacon sheet is open.
   // Swapping out the split layout remounts MapPreview and forces a full map reload.
   const isChatVisible = !isNarrowViewport || (!isCreationSheetVisible && isNarrowBeaconOpen);
   const shouldShowMap = isCreationSheetVisible || !isNarrowViewport || !isNarrowBeaconOpen;
-  const activeCallDuration = formatCallDuration(activeCall?.startedAt, callTimerNow);
+  const activeCallDuration = formatCallDuration(connectedActiveCall?.startedAt, callTimerNow);
+  const activeCallParticipantCount = useMemo(
+    () =>
+      Array.from(new Set(connectedActiveCall?.participantPubkeys.map((pubkey) => pubkey.trim()).filter(Boolean) ?? [])).length,
+    [connectedActiveCall?.participantPubkeys]
+  );
+  const liveBeaconTiles = useMemo(
+    () =>
+      filteredBeaconTiles.filter((tile) => {
+        const liveParticipantCount =
+          connectedActiveCall?.geohash === tile.geohash && activeCallParticipantCount > 0
+            ? activeCallParticipantCount
+            : tile.participants.length;
+
+        return liveParticipantCount > 0;
+      }),
+    [connectedActiveCall?.geohash, activeCallParticipantCount, filteredBeaconTiles]
+  );
+  const visibleNoteCount = useMemo(
+    () => filteredBeaconTiles.reduce((sum, tile) => sum + tile.noteCount, 0),
+    [filteredBeaconTiles]
+  );
   const defaultWorldPrimaryPanelSize = resolveDefaultWorldPrimaryPanelSize(
     typeof window === "undefined" ? 1280 : window.innerWidth
   );
 
   const markerCards = useMemo(() => {
     return filteredBeaconTiles.map((tile) => {
-      const liveParticipantCount = tile.participants.length;
-      const showCallTimer = activeCall?.geohash === tile.geohash && Boolean(activeCallDuration);
+      const liveParticipantCount =
+        connectedActiveCall?.geohash === tile.geohash && activeCallParticipantCount > 0
+          ? activeCallParticipantCount
+          : tile.participants.length;
+      const showCallTimer = connectedActiveCall?.geohash === tile.geohash && Boolean(activeCallDuration);
       const liveLabel = formatMarkerLiveLabel(liveParticipantCount, showCallTimer ? activeCallDuration : null);
 
       return {
@@ -194,10 +229,10 @@ export function WorldRoute() {
         )
       };
     });
-  }, [activeCall?.geohash, activeCallDuration, filteredBeaconTiles]);
+  }, [connectedActiveCall?.geohash, activeCallDuration, activeCallParticipantCount, filteredBeaconTiles]);
 
   useEffect(() => {
-    if (!activeCall?.startedAt) {
+    if (!connectedActiveCall?.startedAt) {
       return undefined;
     }
 
@@ -210,7 +245,7 @@ export function WorldRoute() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeCall?.startedAt]);
+  }, [connectedActiveCall?.startedAt]);
 
   useEffect(() => {
     if (!isNarrowViewport) {
@@ -221,6 +256,12 @@ export function WorldRoute() {
   useEffect(() => {
     if (isNarrowViewport && selectedBeaconGeohash) {
       setIsNarrowBeaconOpen(true);
+    }
+  }, [isNarrowViewport, selectedBeaconGeohash]);
+
+  useEffect(() => {
+    if (isNarrowViewport && !selectedBeaconGeohash) {
+      setIsNarrowBeaconOpen(false);
     }
   }, [isNarrowViewport, selectedBeaconGeohash]);
 
@@ -276,10 +317,13 @@ export function WorldRoute() {
 
   function focusBeaconOnMap(geohash: string) {
     setPendingBeacon(null);
-    setSearchParams(buildBeaconMapSearch(geohash, createBeaconMapFocusKey()));
     if (isNarrowViewport) {
+      setSearchParams({});
       setIsNarrowBeaconOpen(false);
+      return;
     }
+
+    setSearchParams(buildBeaconMapSearch(geohash, createBeaconMapFocusKey()));
   }
 
   function closePendingBeacon() {
@@ -409,7 +453,7 @@ export function WorldRoute() {
         tiles={filteredBeaconTiles}
         selectedGeohash={selectedBeaconGeohash}
         focusRequestKey={mapFocusKey || undefined}
-        activeGeohash={activeCall?.geohash}
+        activeGeohash={connectedActiveCall?.geohash}
         onSelectTile={openBeacon}
         pendingGeohash={pendingBeacon?.geohash}
         onBackgroundSelectTile={openPendingBeacon}
@@ -419,21 +463,23 @@ export function WorldRoute() {
         <>
           {pendingBeacon ? (
             <section className="world-sheet world-beacon-sheet" aria-label={`Light beacon ${pendingBeacon.geohash}`}>
-              <div className="world-sheet-header">
-                <div>
-                  <p className="muted">{worldBeaconExplainer}</p>
-                </div>
-              </div>
-
               {pendingBeacon.step === "prompt" ? (
-                <div className="world-sheet-actions action-row">
-                  <button className="secondary-button" type="button" onClick={closePendingBeacon}>
-                    Cancel
-                  </button>
-                  <button className="primary-button" type="button" onClick={openBeaconCreationForm}>
-                    Light Beacon
-                  </button>
-                </div>
+                <>
+                  <div className="world-sheet-header">
+                    <div>
+                      <p className="muted">{worldBeaconExplainer}</p>
+                    </div>
+                  </div>
+
+                  <div className="world-sheet-actions action-row">
+                    <button className="secondary-button" type="button" onClick={closePendingBeacon}>
+                      Cancel
+                    </button>
+                    <button className="primary-button" type="button" onClick={openBeaconCreationForm}>
+                      Light Beacon
+                    </button>
+                  </div>
+                </>
               ) : (
                 <form className="metadata-form world-beacon-form" onSubmit={handleSubmitPendingBeacon}>
                   <label className="field-stack">
@@ -449,20 +495,26 @@ export function WorldRoute() {
                     />
                   </label>
 
-                  <label className="field-stack">
+                  <div className="field-stack">
                     <span>Picture</span>
                     {pendingBeacon.picture ? (
-                      <img
-                        className="metadata-picture-preview"
-                        src={pendingBeacon.picture}
-                        alt="Beacon picture preview"
-                      />
+                      <div className="world-beacon-picture-row">
+                        <img
+                          className="metadata-picture-preview"
+                          src={pendingBeacon.picture}
+                          alt="Beacon picture preview"
+                        />
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => updatePendingBeacon("picture", "")}
+                          disabled={pendingBeacon.submitting || pendingBeacon.pictureUploading}
+                        >
+                          Remove picture
+                        </button>
+                      </div>
                     ) : null}
-                    <p className={pendingBeacon.picture ? "metadata-readonly-value" : "metadata-readonly-value muted"}>
-                      {pendingBeacon.picture ||
-                        (pendingBeacon.pictureUploading ? "Uploading picture..." : "No picture uploaded yet.")}
-                    </p>
-                  </label>
+                  </div>
 
                   <label className="field-stack">
                     <span>Upload image</span>
@@ -479,21 +531,6 @@ export function WorldRoute() {
                     />
                   </label>
 
-                  <div className="action-row">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => updatePendingBeacon("picture", "")}
-                      disabled={
-                        pendingBeacon.submitting ||
-                        pendingBeacon.pictureUploading ||
-                        pendingBeacon.picture.length === 0
-                      }
-                    >
-                      Remove picture
-                    </button>
-                  </div>
-
                   <label className="field-stack">
                     <span>About</span>
                     <textarea
@@ -502,18 +539,6 @@ export function WorldRoute() {
                       onChange={(event) => updatePendingBeacon("about", event.target.value)}
                       placeholder="What should people know about this beacon?"
                       rows={3}
-                      disabled={pendingBeacon.submitting || pendingBeacon.pictureUploading}
-                    />
-                  </label>
-
-                  <label className="field-stack">
-                    <span>Tags</span>
-                    <input
-                      className="field-input"
-                      type="text"
-                      value={pendingBeacon.tags}
-                      onChange={(event) => updatePendingBeacon("tags", event.target.value)}
-                      placeholder="cohort, curriculum:zero-to-hero, level:beginner, hybrid"
                       disabled={pendingBeacon.submitting || pendingBeacon.pictureUploading}
                     />
                   </label>
@@ -546,7 +571,8 @@ export function WorldRoute() {
     </div>
   ) : null;
 
-  const chatPanel = isChatVisible ? (
+  const showWorldOverview = !isNarrowViewport && !selectedBeacon;
+  const chatPanel = isChatVisible && (selectedBeacon || showWorldOverview) ? (
     <aside className="panel route-surface route-surface-chats world-route-chat-panel">
       {selectedBeacon ? (
         <BeaconThreadPanel
@@ -556,30 +582,89 @@ export function WorldRoute() {
           onActivateBeacon={focusBeaconOnMap}
         />
       ) : (
-        <article className="thread-detail world-manifesto-panel" aria-label="Synchrono City manifesto">
-          <div className="world-manifesto-copy">
-            <div>
-              <p className="section-label">Manifesto</p>
-              <h3>Synchrono City</h3>
+        <article className="thread-detail world-manifesto-panel" aria-label="World overview">
+          <div className="feature-card world-manifesto-card">
+            <div className="world-manifesto-copy">
+              <div>
+                <p className="section-label">Welcome to</p>
+                <h3>
+                  <a className="marker-card-title-link" href="https://synchrono.city" rel="noreferrer" target="_blank">
+                    https://synchrono.city
+                  </a>
+                </h3>
+              </div>
             </div>
-            <p className="muted">{worldManifestoIntro}</p>
-            <p className="muted">{worldManifestoSummary}</p>
-          </div>
-          <div className="world-manifesto-principles">
-            {worldManifestoPrinciples.map((principle) => (
-              <article key={principle.title} className="world-manifesto-principle">
-                <h4>{principle.title}</h4>
-                <p className="muted">{principle.body}</p>
-              </article>
-            ))}
+            <div className="route-header-meta">
+              <span className="thread-pill live">{liveBeaconTiles.length} live</span>
+              <span className="thread-pill">{filteredBeaconTiles.length} beacons</span>
+              <span className="thread-pill">{visibleNoteCount} notes</span>
+            </div>
+            <div className="world-manifesto-principles">
+              <p className="muted">{worldOverviewParagraphs[0]}</p>
+              <div className="world-stack-links" aria-label="Stack overview">
+                {worldStackItems.map((item) => {
+                  const isOpen = openStackExplainer?.label === item.label;
+
+                  return (
+                    <button
+                      key={item.label}
+                      className="secondary-link world-stack-link"
+                      type="button"
+                      aria-expanded={isOpen}
+                      aria-controls={`world-stack-explainer-${item.label.toLowerCase()}`}
+                      onClick={() => setOpenStackExplainer(isOpen ? null : item)}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {openStackExplainer ? (
+                <div
+                  className="mini-card world-stack-explainer"
+                  id={`world-stack-explainer-${openStackExplainer.label.toLowerCase()}`}
+                >
+                  <strong>{openStackExplainer.title}</strong>
+                  <p>{openStackExplainer.description}</p>
+                  <div className="world-stack-explainer-links">
+                    {openStackExplainer.links.map((link) => (
+                      <a
+                        key={link.href}
+                        className="world-stack-explainer-link"
+                        href={link.href}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        {link.href}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {worldOverviewParagraphs.slice(1).map((paragraph) => (
+                <p key={paragraph} className="muted">
+                  {paragraph}
+                </p>
+              ))}
+              <p className="muted">to host your own, just run</p>
+              <pre className="world-overview-code-block">
+                <code>{`git clone\n./setup.sh`}</code>
+              </pre>
+              <p className="muted">
+                There is geographic signal, so online relationships have a lower barrier to become in-person
+                interactions, and end-to-end encrypted DMs when you want them.
+              </p>
+            </div>
           </div>
         </article>
       )}
     </aside>
   ) : null;
 
+  let content: ReactNode;
+
   if (!isNarrowViewport && mapPanel && chatPanel) {
-    return (
+    content = (
       <ResizablePanels
         as="section"
         className="world-route world-route-split"
@@ -592,14 +677,18 @@ export function WorldRoute() {
         secondary={chatPanel}
       />
     );
+  } else if (!chatPanel) {
+    content = <section className="world-route">{mapPanel}</section>;
+  } else {
+    content = (
+      <section className="world-route world-route-split">
+        {mapPanel}
+        {chatPanel}
+      </section>
+    );
   }
 
-  return (
-    <section className="world-route world-route-split">
-      {mapPanel}
-      {chatPanel}
-    </section>
-  );
+  return <>{content}</>;
 }
 
 function parseBeaconTagInput(value: string) {

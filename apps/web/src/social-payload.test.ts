@@ -22,11 +22,9 @@ describe("normalizeBootstrapPayload", () => {
       ],
       profiles: undefined,
       notes: undefined,
-      feed_segments: undefined,
       cross_relay_items: undefined
     });
 
-    expect(payload.feed_segments).toEqual([]);
     expect(payload.relay_list).toEqual([]);
     expect(payload.cross_relay_items).toEqual([]);
     expect(payload.profiles).toEqual([]);
@@ -188,18 +186,6 @@ describe("normalizeBootstrapPayload filtering", () => {
     expect(payload.notes[0]?.id).toBe("note-1");
   });
 
-  it("filters feed segments with empty name", () => {
-    const payload = normalizeBootstrapPayload({
-      feed_segments: [
-        { name: "Following", description: "Valid" },
-        { name: "", description: "Invalid" }
-      ]
-    });
-
-    expect(payload.feed_segments).toHaveLength(1);
-    expect(payload.feed_segments[0]?.name).toBe("Following");
-  });
-
   it("filters cross-relay items with empty id", () => {
     const payload = normalizeBootstrapPayload({
       cross_relay_items: [
@@ -230,7 +216,6 @@ describe("normalizeBootstrapPayload filtering", () => {
     expect(payload.places).toEqual([]);
     expect(payload.profiles).toEqual([]);
     expect(payload.notes).toEqual([]);
-    expect(payload.feed_segments).toEqual([]);
     expect(payload.relay_list).toEqual([]);
     expect(payload.cross_relay_items).toEqual([]);
     expect(payload.relay_name).toBeUndefined();

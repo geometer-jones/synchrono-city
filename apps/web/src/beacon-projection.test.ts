@@ -86,7 +86,7 @@ describe("buildBeaconProjection", () => {
     });
   });
 
-  it("injects an ephemeral beacon for an active call geohash that is not in bootstrap places", () => {
+  it("injects an ephemeral beacon for a connected call geohash that is not in bootstrap places", () => {
     const activeCall: CallSession = {
       geohash: "9q8yyk34",
       roomID: "beacon:9q8yyk34",
@@ -94,9 +94,9 @@ describe("buildBeaconProjection", () => {
       participantPubkeys: ["npub1scout"],
       participantStates: [],
       mediaStreams: [],
-      transport: "local",
-      connectionState: "local_preview",
-      statusMessage: "Preview",
+      transport: "livekit",
+      connectionState: "connected",
+      statusMessage: "Connected",
       mic: false,
       cam: false,
       screenshare: false,

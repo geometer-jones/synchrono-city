@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { useSearchParams } from "react-router-dom";
 
 import {
   AdminAuthError,
@@ -54,12 +56,15 @@ import {
   importLocalKeyMaterial,
   loadStoredLocalKeyring,
   removeKeyFromKeyring,
+  setKeyVerification,
   setActiveKeyInKeyring,
   storeLocalKeyring,
   type LocalKeyring
 } from "../key-manager";
 import { uploadBlossomFile } from "../media-client";
 import { publishSignedEvent, signEventWithPrivateKey, type ProfileMetadataContent } from "../nostr";
+import { fetchOwnProofVerifications, startOAuthVerification } from "../proof-client";
+import { describeRelayConnectionIssue } from "../relay-url-diagnostics";
 import { showToast } from "../toast";
 
 type RelayHealth = {
@@ -84,25 +89,15 @@ type MetadataDraft = {
 const defaultStanding = "member";
 const defaultProofType = "oauth";
 const defaultGateCapability = "relay.publish";
-const appearanceOptions: { value: AppearanceMode; label: string; description: string }[] = [
-  {
-    value: "dark",
-    label: "Dark",
-    description: "Keep the client in the default low-light palette."
-  },
-  {
-    value: "light",
-    label: "Light",
-    description: "Switch the interface to a brighter daylight palette."
-  },
-  {
-    value: "system",
-    label: "System",
-    description: "Follow your device color-scheme preference automatically."
-  }
+const appearanceOptions: { value: AppearanceMode; label: string }[] = [
+  { value: "dark", label: "Dark" },
+  { value: "light", label: "Light" },
+  { value: "system", label: "System" }
 ];
+const showOAuthVerificationSection = false;
 
 export function SettingsRoute() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const { appearanceMode, resolvedAppearanceMode, setAppearanceMode } = useAppearance();
   const {
     currentUser,
@@ -111,6 +106,7 @@ export function SettingsRoute() {
     relayOperatorPubkey,
     relayURL,
     addRelayListEntry,
+    updateRelayListEntryFlags,
     removeRelayListEntry,
     refreshSocialBootstrap,
     setLocalCurrentUserPubkey,
@@ -125,12 +121,16 @@ export function SettingsRoute() {
   const [importKeysOpen, setImportKeysOpen] = useState(false);
   const [keyImportValue, setKeyImportValue] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [isRefreshingSelectedKeyProofs, setIsRefreshingSelectedKeyProofs] = useState(false);
+  const [isStartingOAuth, setIsStartingOAuth] = useState(false);
+  const [isOAuthHelpOpen, setIsOAuthHelpOpen] = useState(false);
   const [metadataDrafts, setMetadataDrafts] = useState<Record<string, MetadataDraft>>({});
   const [metadataErrors, setMetadataErrors] = useState<Record<string, string>>({});
   const [metadataSaving, setMetadataSaving] = useState<Record<string, boolean>>({});
   const [pictureUploading, setPictureUploading] = useState<Record<string, boolean>>({});
   const [selectedKeyPubkey, setSelectedKeyPubkey] = useState<string | null>(
-    () => loadStoredLocalKeyring().activePublicKeyNpub
+    () => new URLSearchParams(window.location.search).get("key") ?? loadStoredLocalKeyring().activePublicKeyNpub
   );
 
   const [guestEntries, setGuestEntries] = useState<PolicyAssignment[]>([]);
@@ -182,11 +182,9 @@ export function SettingsRoute() {
   const [relayDraftName, setRelayDraftName] = useState("");
   const [relayDraftURL, setRelayDraftURL] = useState("");
   const [relayListError, setRelayListError] = useState<string | null>(null);
-  const [appearanceOpen, setAppearanceOpen] = useState(true);
-  const [keysOpen, setKeysOpen] = useState(true);
-  const [relaysOpen, setRelaysOpen] = useState(true);
-  const [adminOpen, setAdminOpen] = useState(false);
+  const [relayRemovalTarget, setRelayRemovalTarget] = useState<{ url: string; label: string } | null>(null);
   const isNarrowKeysLayout = useNarrowViewport(900);
+  const oauthHelpId = useId();
 
   const refreshGenerationRef = useRef(0);
 
@@ -215,8 +213,15 @@ export function SettingsRoute() {
 
   const canAdmin = adminSession?.access.decision === "allow";
   const activeLocalKey = getActiveLocalKey(localKeyring);
+  const configuredOperatorPubkey =
+    health?.operator_pubkey != null ? health.operator_pubkey.trim() : relayOperatorPubkey.trim();
+  const hasConfiguredOperatorPubkey = configuredOperatorPubkey.length > 0;
   const hasOperatorPubkey =
-    currentUser.pubkey === relayOperatorPubkey || adminSession?.pubkey === relayOperatorPubkey;
+    hasConfiguredOperatorPubkey &&
+    (currentUser.pubkey === configuredOperatorPubkey || adminSession?.pubkey === configuredOperatorPubkey);
+  const relayConnectionIssue = describeRelayConnectionIssue(health?.relay_url ?? relayURL, window.location.href);
+
+  useDialogEscape(Boolean(relayRemovalTarget), () => setRelayRemovalTarget(null));
 
   useEffect(() => {
     setMetadataDrafts((current) => {
@@ -253,10 +258,38 @@ export function SettingsRoute() {
   }, [activeLocalKey?.publicKeyNpub, localKeyring.keys, selectedKeyPubkey]);
 
   useEffect(() => {
-    if (hasOperatorPubkey) {
-      setAdminOpen(true);
+    const requestedKey = searchParams.get("key");
+    if (!requestedKey) {
+      return;
     }
-  }, [hasOperatorPubkey]);
+
+    if (localKeyring.keys.some((key) => key.publicKeyNpub === requestedKey)) {
+      setSelectedKeyPubkey(requestedKey);
+    }
+  }, [localKeyring.keys, searchParams]);
+
+  useEffect(() => {
+    setVerificationError(null);
+  }, [selectedKeyPubkey]);
+
+  useEffect(() => {
+    const oauthStatus = searchParams.get("oauth_status");
+    if (!oauthStatus) {
+      return;
+    }
+
+    if (oauthStatus === "success") {
+      showToast("OAuth verification recorded for this key.", "info");
+    } else {
+      showToast(searchParams.get("oauth_error") || "OAuth verification failed.", "error");
+    }
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("oauth_status");
+    nextParams.delete("oauth_error");
+    nextParams.delete("oauth_proof");
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   function updateMetadataDraft(publicKeyNpub: string, patch: Partial<MetadataDraft>) {
     setMetadataDrafts((current) => ({
@@ -309,12 +342,82 @@ export function SettingsRoute() {
     setLocalCurrentUserPubkey(normalizedKeyring.activePublicKeyNpub);
   }
 
+  function persistLocalKeyVerification(publicKeyNpub: string, verification: NonNullable<LocalKeyring["keys"][number]["verifications"]>["oauth"]) {
+    setLocalKeyring((current) => {
+      const nextKeyring = setKeyVerification(current, publicKeyNpub, "oauth", verification ?? null);
+      storeLocalKeyring(nextKeyring);
+      return nextKeyring;
+    });
+  }
+
+  async function refreshSelectedKeyOAuthStatus(key: LocalKeyring["keys"][number], options?: { silent?: boolean }) {
+    if (!key.privateKeyHex) {
+      return;
+    }
+
+    setIsRefreshingSelectedKeyProofs(true);
+    setVerificationError(null);
+    try {
+      const proofs = await fetchOwnProofVerifications(
+        {
+          privateKeyHex: key.privateKeyHex,
+          publicKeyHex: key.publicKeyHex
+        },
+        "oauth"
+      );
+
+      const latestActiveProof = proofs.find((entry) => entry.proof_type === "oauth" && !entry.revoked);
+      persistLocalKeyVerification(
+        key.publicKeyNpub,
+        latestActiveProof
+          ? {
+              status: "verified",
+              proofValue: latestActiveProof.proof_value,
+              checkedAt: new Date().toISOString(),
+              verifiedAt: latestActiveProof.created_at,
+              metadata: latestActiveProof.metadata
+            }
+          : {
+              status: "missing",
+              checkedAt: new Date().toISOString()
+            }
+      );
+    } catch (error) {
+      if (!options?.silent) {
+        setVerificationError(error instanceof Error ? error.message : "Could not refresh OAuth verification.");
+      }
+    } finally {
+      setIsRefreshingSelectedKeyProofs(false);
+    }
+  }
+
+  async function handleStartOAuthAuthentication(key: LocalKeyring["keys"][number]) {
+    if (!key.privateKeyHex) {
+      setVerificationError("Selected key is not unlocked in this browser.");
+      return;
+    }
+
+    setIsStartingOAuth(true);
+    setVerificationError(null);
+    try {
+      const result = await startOAuthVerification(`/app/settings?key=${encodeURIComponent(key.publicKeyNpub)}`, {
+        privateKeyHex: key.privateKeyHex,
+        publicKeyHex: key.publicKeyHex
+      });
+      window.location.assign(result.authorization_url);
+    } catch (error) {
+      setVerificationError(error instanceof Error ? error.message : "Could not start OAuth verification.");
+      setIsStartingOAuth(false);
+    }
+  }
+
   function handleGenerateKeys() {
     const result = addKeyToKeyring(localKeyring, generateLocalKeyMaterial());
     commitLocalKeyring(result.keyring);
     setSelectedKeyPubkey(result.activeKey.publicKeyNpub);
     setKeyImportValue("");
     setKeyError(null);
+    setVerificationError(null);
     showToast(result.added ? "Local Nostr keypair generated." : "Existing local key activated.", "info");
   }
 
@@ -326,6 +429,7 @@ export function SettingsRoute() {
       setImportKeysOpen(false);
       setKeyImportValue("");
       setKeyError(null);
+      setVerificationError(null);
       showToast(result.added ? "Local Nostr keypair imported." : "Imported key already exists. Activated existing key.", "info");
     } catch (error) {
       setKeyError(error instanceof Error ? error.message : "Key import failed.");
@@ -347,6 +451,7 @@ export function SettingsRoute() {
     setSelectedKeyPubkey(publicKeyNpub);
     commitLocalKeyring(setActiveKeyInKeyring(localKeyring, publicKeyNpub));
     setKeyError(null);
+    setVerificationError(null);
     showToast("Local key activated for this session.", "info");
   }
 
@@ -368,6 +473,7 @@ export function SettingsRoute() {
     const removingActiveKey = activeLocalKey?.publicKeyNpub === publicKeyNpub;
     commitLocalKeyring(removeKeyFromKeyring(localKeyring, publicKeyNpub));
     setKeyError(null);
+    setVerificationError(null);
     showToast(removingActiveKey ? "Active local key removed." : "Local key removed.", "info");
   }
 
@@ -721,12 +827,39 @@ export function SettingsRoute() {
     }
   }
 
-  function handleRemoveRelay(url: string, label: string) {
+  function handleRequestRemoveRelay(url: string, label: string) {
+    setRelayListError(null);
+    setRelayRemovalTarget({ url, label });
+  }
+
+  function handleConfirmRemoveRelay() {
+    if (!relayRemovalTarget) {
+      return;
+    }
+
     setRelayListError(null);
 
     try {
-      removeRelayListEntry(url);
-      showToast(`Removed relay ${label}.`, "info");
+      removeRelayListEntry(relayRemovalTarget.url);
+      showToast(`Removed relay ${relayRemovalTarget.label}.`, "info");
+      setRelayRemovalTarget(null);
+    } catch (error) {
+      setRelayListError(error instanceof Error ? error.message : "Relay update failed.");
+    }
+  }
+
+  function handleRelayFlagChange(
+    relay: { url: string; name: string; inbox: boolean; outbox: boolean },
+    flag: "inbox" | "outbox",
+    checked: boolean
+  ) {
+    setRelayListError(null);
+
+    try {
+      updateRelayListEntryFlags(relay.url, {
+        inbox: flag === "inbox" ? checked : relay.inbox,
+        outbox: flag === "outbox" ? checked : relay.outbox
+      });
     } catch (error) {
       setRelayListError(error instanceof Error ? error.message : "Relay update failed.");
     }
@@ -739,6 +872,16 @@ export function SettingsRoute() {
   const isSelectedUploadingPicture = selectedKey ? pictureUploading[selectedKey.publicKeyNpub] === true : false;
   const isSelectedSavingMetadata = selectedKey ? metadataSaving[selectedKey.publicKeyNpub] === true : false;
   const isSelectedKeyActive = selectedKey ? activeLocalKey?.publicKeyNpub === selectedKey.publicKeyNpub : false;
+  const selectedOAuthVerification = selectedKey?.verifications?.oauth;
+
+  useEffect(() => {
+    if (!showOAuthVerificationSection || !selectedKey?.privateKeyHex) {
+      return;
+    }
+
+    void refreshSelectedKeyOAuthStatus(selectedKey, { silent: true });
+  }, [selectedKey?.privateKeyHex, selectedKey?.publicKeyHex, selectedKey?.publicKeyNpub]);
+
   const keysListPanel = (
     <div className="admin-form keys-list-panel">
       {!importKeysOpen ? (
@@ -778,17 +921,26 @@ export function SettingsRoute() {
         {localKeyring.keys.map((key) => {
           const metadataDraft = getMetadataDraft(metadataDrafts, key.publicKeyNpub);
           const isActive = activeLocalKey?.publicKeyNpub === key.publicKeyNpub;
+          const isSelected = selectedKey?.publicKeyNpub === key.publicKeyNpub;
           const displayName = getLocalKeyDisplayName(metadataDraft, key);
 
           return (
-            <article key={key.id} className="mini-card admin-record key-summary-card">
-              <div className="key-summary-main">
+            <article
+              key={key.id}
+              className={`mini-card admin-record key-summary-card${isSelected ? " is-selected" : ""}`}
+            >
+              <button
+                className="key-summary-main key-summary-select"
+                type="button"
+                onClick={() => setSelectedKeyPubkey(key.publicKeyNpub)}
+                aria-pressed={isSelected}
+              >
                 <KeyAvatar picture={metadataDraft.picture} name={displayName} />
                 <div className="key-summary-meta">
                   <strong>{displayName}</strong>
                   <code className="key-summary-pubkey">{truncateMiddle(key.publicKeyHex, 8, 8)}</code>
                 </div>
-              </div>
+              </button>
               <div className="key-summary-actions">
                 {isActive ? (
                   <span className="thread-pill live">Active</span>
@@ -796,18 +948,12 @@ export function SettingsRoute() {
                   <button
                     className="secondary-button key-activate-button"
                     type="button"
+                    aria-label="Use key"
                     onClick={() => handleActivateKey(key.publicKeyNpub)}
                   >
-                    Use key
+                    Use
                   </button>
                 )}
-                <button
-                  className="secondary-button keys-mobile-only"
-                  type="button"
-                  onClick={() => setSelectedKeyPubkey(key.publicKeyNpub)}
-                >
-                  View profile
-                </button>
               </div>
             </article>
           );
@@ -847,6 +993,77 @@ export function SettingsRoute() {
               Use key
             </button>
           </div>
+        ) : null}
+
+        {showOAuthVerificationSection ? (
+          <>
+            <article className="mini-card admin-record">
+              <div className="detail-header">
+                <div className="detail-heading-with-help">
+                  <p className="section-label">Relay verification</p>
+                  <div className="detail-heading-row">
+                    <h4>OAuth status for call access</h4>
+                    <button
+                      className="copy-icon-button helper-icon-button"
+                      type="button"
+                      aria-label={isOAuthHelpOpen ? "Hide OAuth status help" : "Show OAuth status help"}
+                      aria-expanded={isOAuthHelpOpen}
+                      aria-controls={oauthHelpId}
+                      onClick={() => setIsOAuthHelpOpen((current) => !current)}
+                    >
+                      ?
+                    </button>
+                  </div>
+                </div>
+                <span className={`thread-pill${selectedOAuthVerification?.status === "verified" ? " live" : ""}`}>
+                  {selectedOAuthVerification?.status === "verified" ? "Verified" : "Missing"}
+                </span>
+              </div>
+              {isOAuthHelpOpen ? (
+                <div id={oauthHelpId} className="helper-text-stack">
+                  <p className="muted">
+                    Pubkey is your primary Nostr identity. OAuth is a relay-local secondary marker so operators can retain
+                    a less-fungible abuse and ban handle for call resources if someone violates relay policy.
+                  </p>
+                  <p className="muted">
+                    Removing or regenerating a key is not sufficient on its own because keys are effectively free. This
+                    OAuth binding is a convenience tool for relay operators, and they can still fine-tune their gate policy
+                    in Concierge.
+                  </p>
+                </div>
+              ) : null}
+              <p className={selectedOAuthVerification?.proofValue ? "metadata-readonly-value" : "metadata-readonly-value muted"}>
+                {selectedOAuthVerification?.proofValue || "No active OAuth proof recorded for this key."}
+              </p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void refreshSelectedKeyOAuthStatus(selectedKey)}
+                  disabled={!selectedKey.privateKeyHex || isRefreshingSelectedKeyProofs || isStartingOAuth}
+                >
+                  {isRefreshingSelectedKeyProofs ? "Refreshing..." : "Refresh OAuth status"}
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => void handleStartOAuthAuthentication(selectedKey)}
+                  disabled={!selectedKey.privateKeyHex || isStartingOAuth || isRefreshingSelectedKeyProofs}
+                >
+                  {isStartingOAuth
+                    ? "Opening OAuth..."
+                    : selectedOAuthVerification?.status === "verified"
+                      ? "Re-authenticate with OAuth"
+                      : "Authenticate with OAuth"}
+                </button>
+              </div>
+              <small>
+                Last checked {selectedOAuthVerification?.checkedAt ? formatRelativeTime(selectedOAuthVerification.checkedAt) : "never"}
+                {selectedOAuthVerification?.verifiedAt ? ` · verified ${formatRelativeTime(selectedOAuthVerification.verifiedAt)}` : ""}
+              </small>
+            </article>
+            {verificationError ? <p className="field-error">{verificationError}</p> : null}
+          </>
         ) : null}
 
         <table className="keypair-table">
@@ -958,27 +1175,10 @@ export function SettingsRoute() {
 
   return (
     <section className="panel route-surface route-surface-settings">
-      <SettingsSection
-        title="Appearance"
-        description="Choose whether the client stays dark, stays light, or follows your system preference."
-        isOpen={appearanceOpen}
-        onToggle={() => setAppearanceOpen((open) => !open)}
-        status={formatAppearanceStatus(appearanceMode, resolvedAppearanceMode)}
-      >
+      <SettingsSection title="Appearance">
         <article className="feature-card appearance-mode-card">
           <div className="appearance-mode-head">
-            <div>
-              <p className="section-label">Theme mode</p>
-              <h3>
-                {appearanceMode === "system"
-                  ? "System appearance enabled"
-                  : `${formatAppearanceLabel(appearanceMode)} mode enabled`}
-              </h3>
-              <p className="muted">Updates apply immediately and persist in this browser.</p>
-            </div>
-            <span className="thread-pill">
-              {formatAppearanceLabel(resolvedAppearanceMode)} applied
-            </span>
+            <p className="section-label">Theme</p>
           </div>
 
           <div className="appearance-mode-grid" role="radiogroup" aria-label="Appearance mode">
@@ -996,24 +1196,16 @@ export function SettingsRoute() {
                   onChange={() => setAppearanceMode(option.value)}
                 />
                 <span className="appearance-mode-label">{option.label}</span>
-                <span className="appearance-mode-description">{option.description}</span>
               </label>
             ))}
           </div>
-
-          <p className="muted appearance-mode-footnote">
-            {appearanceMode === "system"
-              ? `System mode is currently applying ${resolvedAppearanceMode}.`
-              : `The client stays in ${appearanceMode} mode until you change this setting.`}
-          </p>
         </article>
       </SettingsSection>
 
       <SettingsSection
         title="Keys"
-        description="Manage browser-local keypairs and profile metadata; the active key controls note authorship and place presence."
-        isOpen={keysOpen}
-        onToggle={() => setKeysOpen((open) => !open)}
+        description="Nostr uses asymmetric keypairs: your private key stays secret and signs events, while your public key identifies you so relays and other clients can verify authorship."
+        descriptionDisplay="modal"
         status={activeLocalKey ? "Local key active" : "No local key"}
       >
         {!isNarrowKeysLayout && keysDetailPanel ? (
@@ -1037,17 +1229,19 @@ export function SettingsRoute() {
 
       <SettingsSection
         title="Relays"
-        description="Relay list and local scene signals."
-        isOpen={relaysOpen}
-        onToggle={() => setRelaysOpen((open) => !open)}
+        description={
+          <>
+            <p className="muted">Relays are the servers that store and forward Nostr events between clients.</p>
+            <p className="muted">
+              Your client publishes notes, profile updates, and reactions to relays, then reads from relays to
+              discover posts and people. The list below controls which relays this browser connects to.
+            </p>
+          </>
+        }
+        descriptionDisplay="modal"
         status={health?.relay_name ?? "Relay"}
       >
         <div className="admin-form">
-          <h3>{relayList.length} {relayList.length === 1 ? "relay configured" : "relays configured"}</h3>
-          <p className="muted">
-            Add or remove relay endpoints for this browser. Inbox and outbox flags still reflect the relay metadata
-            carried into the client.
-          </p>
           <form className="relay-list-form" onSubmit={handleAddRelay}>
             <label className="field-stack">
               <span>Relay name</span>
@@ -1074,9 +1268,6 @@ export function SettingsRoute() {
             </div>
           </form>
           {relayListError ? <p className="field-error">{relayListError}</p> : null}
-          <p className="muted relay-list-hint">
-            Relay list changes are stored in this browser and layered over the server bootstrap list.
-          </p>
           <div className="admin-record-list relay-card-list">
             {relayList.map((relay) => {
               const relayLabel = relay.name.trim() || relay.url;
@@ -1084,38 +1275,90 @@ export function SettingsRoute() {
 
               return (
                 <article key={relay.url} className="mini-card admin-record relay-list-card">
-                  <div className="detail-header">
-                    <strong>{relayLabel}</strong>
-                    <span className={isPrimaryRelay ? "thread-pill live" : "thread-pill"}>
-                      {isPrimaryRelay ? "Primary" : "Listed"}
-                    </span>
+                  <div className="relay-card-main">
+                    <strong className="relay-card-title">{relayLabel}</strong>
+                    <p className="relay-card-url">{relay.url}</p>
+                    <div className="checkbox-grid relay-card-flags">
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={relay.inbox}
+                          onChange={(event) => handleRelayFlagChange(relay, "inbox", event.target.checked)}
+                          aria-label={`${relayLabel} inbox`}
+                        />
+                        <span>Inbox</span>
+                      </label>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={relay.outbox}
+                          onChange={(event) => handleRelayFlagChange(relay, "outbox", event.target.checked)}
+                          aria-label={`${relayLabel} outbox`}
+                        />
+                        <span>Outbox</span>
+                      </label>
+                    </div>
                   </div>
-                  <p className="relay-card-url">{relay.url}</p>
-                  <div className="checkbox-grid relay-card-flags">
-                    <label className="checkbox-row">
-                      <input type="checkbox" checked={relay.inbox} readOnly aria-label={`${relayLabel} inbox`} />
-                      <span>Inbox</span>
-                    </label>
-                    <label className="checkbox-row">
-                      <input type="checkbox" checked={relay.outbox} readOnly aria-label={`${relayLabel} outbox`} />
-                      <span>Outbox</span>
-                    </label>
-                  </div>
-                  <div className="action-row">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => handleRemoveRelay(relay.url, relayLabel)}
-                      disabled={isPrimaryRelay}
-                      aria-label={`Remove ${relayLabel}`}
-                    >
-                      {isPrimaryRelay ? "Primary relay" : "Remove relay"}
-                    </button>
+                  <div className="relay-card-side">
+                    {isPrimaryRelay ? (
+                      <span className="thread-pill live">Primary</span>
+                    ) : (
+                      <button
+                        className="secondary-button danger-button"
+                        type="button"
+                        onClick={() => handleRequestRemoveRelay(relay.url, relayLabel)}
+                        aria-label={`Remove ${relayLabel}`}
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
                 </article>
               );
             })}
           </div>
+          {relayRemovalTarget
+            ? createPortal(
+                <div className="thread-modal-backdrop" role="presentation" onClick={() => setRelayRemovalTarget(null)}>
+                  <div
+                    className="thread-modal"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="relay-removal-title"
+                    aria-describedby="relay-removal-description"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="detail-header thread-modal-header">
+                      <div className="thread-modal-identity">
+                        <div className="marker-participant-meta">
+                          <p className="section-label">Relays</p>
+                          <h3 id="relay-removal-title">Remove relay?</h3>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="thread-modal-body" id="relay-removal-description">
+                      <p className="muted">
+                        Remove <strong>{relayRemovalTarget.label}</strong> from this browser&apos;s relay list?
+                      </p>
+                      <p className="muted">This only changes the local relay override and can be added again later.</p>
+                      <div className="action-row">
+                        <button className="secondary-button" type="button" onClick={() => setRelayRemovalTarget(null)}>
+                          Cancel
+                        </button>
+                        <button
+                          className="secondary-button danger-button"
+                          type="button"
+                          onClick={handleConfirmRemoveRelay}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>,
+                document.body
+              )
+            : null}
         </div>
       </SettingsSection>
 
@@ -1124,13 +1367,22 @@ export function SettingsRoute() {
         description={
           hasOperatorPubkey
             ? "Operator governance forms, audit history, relay health checks, and privileged relay controls."
-            : "Connect or switch to the relay operator pubkey to unlock admin controls and review relay health."
+            : undefined
         }
-        isOpen={adminOpen}
-        onToggle={() => setAdminOpen((open) => !open)}
         status={hasOperatorPubkey ? "Operator key detected" : "Locked"}
       >
-        <article className="feature-card admin-status">
+        {!hasOperatorPubkey ? (
+          <article className="feature-card admin-status">
+            <p className="section-label">Admin locked</p>
+            <h3>Operator pubkey required</h3>
+            <p>
+              Admin controls open once the current session or connected signer matches the relay operator pubkey.
+            </p>
+            {relayConnectionIssue ? <p className="field-error">{relayConnectionIssue}</p> : null}
+          </article>
+        ) : (
+          <>
+            <article className="feature-card admin-status">
           <p className="section-label">Admin access</p>
           <h3>{adminSession ? "Browser signer verified" : "Verify browser signer"}</h3>
           <p className="muted">
@@ -1171,16 +1423,6 @@ export function SettingsRoute() {
           </div>
         </article>
 
-        {!hasOperatorPubkey ? (
-          <article className="feature-card admin-status">
-            <p className="section-label">Admin locked</p>
-            <h3>Operator pubkey required</h3>
-            <p>
-              Admin controls open once the current session or connected signer matches the relay operator pubkey.
-            </p>
-          </article>
-        ) : null}
-
         <article className="feature-card admin-status">
           <p className="section-label">Relay health</p>
           <h3>{health?.relay_name ?? "Synchrono City relay"}</h3>
@@ -1195,13 +1437,14 @@ export function SettingsRoute() {
             </div>
             <div>
               <dt>Operator pubkey</dt>
-              <dd>{health?.operator_pubkey ?? relayOperatorPubkey}</dd>
+              <dd>{configuredOperatorPubkey}</dd>
             </div>
             <div>
               <dt>Last health timestamp</dt>
               <dd>{health?.timestamp ?? "Pending"}</dd>
             </div>
           </dl>
+          {relayConnectionIssue ? <p className="field-error">{relayConnectionIssue}</p> : null}
         </article>
 
         {adminError ? (
@@ -1800,6 +2043,8 @@ export function SettingsRoute() {
             </>
           )}
         </section>
+          </>
+        )}
       </SettingsSection>
     </section>
   );
@@ -1807,57 +2052,136 @@ export function SettingsRoute() {
 
 type SettingsSectionProps = {
   title: string;
-  description: string;
-  isOpen: boolean;
-  onToggle: () => void;
-  status: string;
+  description?: ReactNode;
+  descriptionDisplay?: "inline" | "modal";
+  status?: string;
   children: ReactNode;
 };
 
-function SettingsSection({ title, description, isOpen, onToggle, status, children }: SettingsSectionProps) {
-  const sectionID = `${title.toLowerCase()}-settings-section`;
+function SettingsSection({
+  title,
+  description,
+  descriptionDisplay = "inline",
+  status,
+  children
+}: SettingsSectionProps) {
+  const sectionSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const descriptionTitleID = `${sectionSlug}-settings-description-title`;
+  const descriptionBodyID = `${sectionSlug}-settings-description-body`;
+  const descriptionPopoverID = `${sectionSlug}-settings-description-popover`;
+  const showDescriptionHelp = descriptionDisplay === "modal" && Boolean(description);
+  const [isDescriptionOpen, setIsDescriptionOpen] = useState(false);
+  const descriptionPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  useDialogEscape(showDescriptionHelp && isDescriptionOpen, () => setIsDescriptionOpen(false));
+  useOutsidePress(showDescriptionHelp && isDescriptionOpen, descriptionPopoverRef, () => setIsDescriptionOpen(false));
 
   return (
     <section className="feature-card settings-section">
-      <button
-        className="settings-section-toggle"
-        type="button"
-        onClick={onToggle}
-        aria-label={`Toggle ${title} section`}
-        aria-expanded={isOpen}
-        aria-controls={sectionID}
-      >
-        <div>
-          <p className="section-label">{title}</p>
-          <h3>{title}</h3>
-          <p className="muted">{description}</p>
+      <div className="settings-section-header">
+        <div className="settings-section-heading">
+          <div className="settings-section-heading-main" ref={descriptionPopoverRef}>
+            <p className="section-label">{title}</p>
+            <div className="settings-section-title-row">
+              <h3>{title}</h3>
+              {showDescriptionHelp ? (
+                <button
+                  className="settings-section-help"
+                  type="button"
+                  aria-label={isDescriptionOpen ? `Hide ${title} description` : `Show ${title} description`}
+                  aria-haspopup="dialog"
+                  aria-expanded={isDescriptionOpen}
+                  aria-controls={descriptionPopoverID}
+                  onClick={() => setIsDescriptionOpen((open) => !open)}
+                >
+                  ?
+                </button>
+              ) : null}
+            </div>
+            {description && !showDescriptionHelp ? (
+              <div className="settings-section-description">{renderSettingsSectionDescription(description)}</div>
+            ) : null}
+            {showDescriptionHelp && isDescriptionOpen && description ? (
+              <div
+                id={descriptionPopoverID}
+                className="settings-section-popover"
+                role="dialog"
+                aria-labelledby={descriptionTitleID}
+                aria-describedby={descriptionBodyID}
+              >
+                <p className="section-label">Settings</p>
+                <h4 id={descriptionTitleID}>{title} description</h4>
+                <div className="settings-section-description" id={descriptionBodyID}>
+                  {renderSettingsSectionDescription(description)}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          {status ? (
+            <div className="settings-section-meta">
+              <span className="thread-pill">{status}</span>
+            </div>
+          ) : null}
         </div>
-        <div className="settings-section-meta">
-          <span className="thread-pill">{status}</span>
-          <span className="settings-section-chevron" aria-hidden="true">
-            {isOpen ? "−" : "+"}
-          </span>
-        </div>
-      </button>
-      {isOpen ? (
-        <div id={sectionID} className="settings-section-body">
-          {children}
-        </div>
-      ) : null}
+      </div>
+      <div className="settings-section-body">{children}</div>
     </section>
   );
 }
 
-function flag(value: boolean) {
-  return value ? "yes" : "no";
+function useDialogEscape(enabled: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [enabled, onClose]);
 }
 
-function formatAppearanceStatus(appearanceMode: AppearanceMode, resolvedAppearanceMode: "dark" | "light") {
-  if (appearanceMode === "system") {
-    return `System (${formatAppearanceLabel(resolvedAppearanceMode)})`;
-  }
+function useOutsidePress(
+  enabled: boolean,
+  containerRef: { current: HTMLElement | null },
+  onClose: () => void
+) {
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
 
-  return formatAppearanceLabel(appearanceMode);
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (containerRef.current?.contains(target)) {
+        return;
+      }
+      onClose();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [containerRef, enabled, onClose]);
+}
+
+function renderSettingsSectionDescription(description: ReactNode) {
+  return typeof description === "string" ? <p className="muted">{description}</p> : description;
+}
+
+function flag(value: boolean) {
+  return value ? "yes" : "no";
 }
 
 function formatAppearanceLabel(appearanceMode: "dark" | "light" | "system") {

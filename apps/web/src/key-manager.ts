@@ -17,6 +17,17 @@ export type LocalKeyMaterial = {
   publicKeyNpub: string;
   privateKeyHex: string;
   privateKeyNsec: string;
+  verifications?: Partial<Record<LocalKeyVerificationType, LocalKeyVerificationRecord>>;
+};
+
+export type LocalKeyVerificationType = "oauth" | "social";
+
+export type LocalKeyVerificationRecord = {
+  status: "verified" | "missing";
+  proofValue?: string;
+  checkedAt: string;
+  verifiedAt?: string;
+  metadata?: Record<string, string>;
 };
 
 export type LocalKeyring = {
@@ -34,6 +45,7 @@ type EncryptedKeyEntry = {
   createdAt: string;
   publicKeyHex: string;
   publicKeyNpub: string;
+  verifications?: Partial<Record<LocalKeyVerificationType, LocalKeyVerificationRecord>>;
   /** Encrypted privateKeyHex */
   encryptedPrivateKeyHex: EncryptedData;
   /** Encrypted privateKeyNsec */
@@ -129,6 +141,7 @@ export function loadStoredLocalKeyring(): LocalKeyring {
           createdAt: key.createdAt,
           publicKeyHex: key.publicKeyHex,
           publicKeyNpub: key.publicKeyNpub,
+          verifications: key.verifications,
           privateKeyHex: "",
           privateKeyNsec: ""
         };
@@ -211,6 +224,7 @@ export async function unlockStoredKeyring(password: string): Promise<LocalKeyrin
             createdAt: key.createdAt,
             publicKeyHex: key.publicKeyHex,
             publicKeyNpub: key.publicKeyNpub,
+            verifications: key.verifications,
             privateKeyHex,
             privateKeyNsec
           };
@@ -277,6 +291,7 @@ export async function storeEncryptedLocalKeyring(keyring: LocalKeyring, password
       createdAt: key.createdAt,
       publicKeyHex: key.publicKeyHex,
       publicKeyNpub: key.publicKeyNpub,
+      verifications: key.verifications,
       encryptedPrivateKeyHex: await encrypt(key.privateKeyHex, password),
       encryptedPrivateKeyNsec: await encrypt(key.privateKeyNsec, password)
     }))
@@ -347,6 +362,29 @@ export function clearStoredLocalKeyring() {
   storage.removeItem(legacyLocalKeyStorageKey);
 }
 
+export function ensureStoredLocalKeyring(): {
+  keyring: LocalKeyring;
+  activeKey: LocalKeyMaterial | null;
+  created: boolean;
+} {
+  const keyring = loadStoredLocalKeyring();
+  if (keyring.keys.length > 0) {
+    return {
+      keyring,
+      activeKey: getActiveLocalKey(keyring),
+      created: false
+    };
+  }
+
+  const result = addKeyToKeyring(createEmptyLocalKeyring(), generateLocalKeyMaterial());
+  storeLocalKeyring(result.keyring);
+  return {
+    keyring: result.keyring,
+    activeKey: result.activeKey,
+    created: true
+  };
+}
+
 export function addKeyToKeyring(keyring: LocalKeyring, key: LocalKeyMaterial): {
   keyring: LocalKeyring;
   activeKey: LocalKeyMaterial;
@@ -397,6 +435,36 @@ export function getActiveLocalKey(keyring: LocalKeyring): LocalKeyMaterial | nul
   return normalizedKeyring.keys.find((key) => key.publicKeyNpub === normalizedKeyring.activePublicKeyNpub) ?? null;
 }
 
+export function setKeyVerification(
+  keyring: LocalKeyring,
+  publicKeyNpub: string,
+  proofType: LocalKeyVerificationType,
+  verification: LocalKeyVerificationRecord | null
+): LocalKeyring {
+  const normalizedKeyring = normalizeKeyring(keyring);
+
+  return {
+    ...normalizedKeyring,
+    keys: normalizedKeyring.keys.map((key) => {
+      if (key.publicKeyNpub !== publicKeyNpub) {
+        return key;
+      }
+
+      const nextVerifications = { ...(key.verifications ?? {}) };
+      if (verification) {
+        nextVerifications[proofType] = verification;
+      } else {
+        delete nextVerifications[proofType];
+      }
+
+      return {
+        ...key,
+        verifications: Object.keys(nextVerifications).length > 0 ? nextVerifications : undefined
+      };
+    })
+  };
+}
+
 function normalizeStoredKeyring(parsed: unknown): StoredKeyring {
   if (!parsed || typeof parsed !== "object") {
     return { activePublicKeyNpub: null, keys: [], encrypted: false };
@@ -445,6 +513,7 @@ function normalizeStoredKey(value: unknown): LocalKeyMaterial | EncryptedKeyEntr
       createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
       publicKeyHex: record.publicKeyHex,
       publicKeyNpub: record.publicKeyNpub,
+      verifications: normalizeStoredVerifications(record.verifications),
       encryptedPrivateKeyHex: record.encryptedPrivateKeyHex,
       encryptedPrivateKeyNsec: record.encryptedPrivateKeyNsec
     };
@@ -461,6 +530,7 @@ function normalizeStoredKey(value: unknown): LocalKeyMaterial | EncryptedKeyEntr
     createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
     publicKeyHex: record.publicKeyHex,
     publicKeyNpub: record.publicKeyNpub,
+    verifications: normalizeStoredVerifications(record.verifications),
     privateKeyHex: record.privateKeyHex,
     privateKeyNsec: record.privateKeyNsec
   };
@@ -506,6 +576,53 @@ function createLocalKeyMaterial(privateKeyBytes: Uint8Array, source: LocalKeyMat
     privateKeyHex,
     privateKeyNsec: encodeNostrBech32("nsec", privateKeyBytes)
   };
+}
+
+function normalizeStoredVerifications(value: unknown): Partial<Record<LocalKeyVerificationType, LocalKeyVerificationRecord>> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const next: Partial<Record<LocalKeyVerificationType, LocalKeyVerificationRecord>> = {};
+
+  for (const proofType of ["oauth", "social"] as const) {
+    const entry = record[proofType];
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+
+    const parsed = entry as Record<string, unknown>;
+    const status = parsed.status === "verified" ? "verified" : parsed.status === "missing" ? "missing" : null;
+    const checkedAt = typeof parsed.checkedAt === "string" ? parsed.checkedAt : null;
+    if (!status || !checkedAt) {
+      continue;
+    }
+
+    next[proofType] = {
+      status,
+      checkedAt,
+      proofValue: typeof parsed.proofValue === "string" ? parsed.proofValue : undefined,
+      verifiedAt: typeof parsed.verifiedAt === "string" ? parsed.verifiedAt : undefined,
+      metadata: normalizeStringRecord(parsed.metadata)
+    };
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function normalizeStringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const next = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) =>
+      typeof entry === "string" ? [[key, entry]] : []
+    )
+  );
+
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 function resolveStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {

@@ -1,26 +1,128 @@
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { useAppState } from "../app-state";
 import { buildCohortBeaconMetadata } from "../beacon-metadata";
-import { isBeaconThreadNote, listPulseLocalNotes } from "../data";
+import {
+  buildCrossRelayFeedItemsFromNotes,
+  buildPulseFeedItems,
+  isConnectedLiveKitCall,
+  isBeaconThreadNote,
+  listPulseLocalNotes,
+  mergeCrossRelayFeedItems,
+  pulseFeedPageSize,
+  type CrossRelayFeedItem,
+  type GeoNote
+} from "../data";
+import { startPulseRelayRollup } from "../pulse-relay-rollup";
+
+const pulseFeedOptions = ["For You", "Following"] as const;
+
+type PulseFeedName = (typeof pulseFeedOptions)[number];
+type PulseFeedWindowState = Record<PulseFeedName, string | null>;
 
 export function PulseRoute() {
   const [searchParams] = useSearchParams();
+  const [selectedFeed, setSelectedFeed] = useState<PulseFeedName>("For You");
+  const [liveRelayNotesByUrl, setLiveRelayNotesByUrl] = useState<Record<string, GeoNote[]>>({});
+  const [feedWindowTopByLane, setFeedWindowTopByLane] = useState<PulseFeedWindowState>({
+    "For You": null,
+    Following: null
+  });
   const {
     activeCall,
-    feedSegments,
+    crossRelayItems,
+    followedPubkeys,
     getNote,
     getPlace,
     getPlaceParticipants,
     getProfile,
     joinPlaceCall,
     listNotesByAuthor,
-    listRecentNotes,
     notes,
     places,
-    pulseFeedItems,
+    profiles,
+    relayBootstrapReady,
+    relayList,
+    relayURL,
     relaySyntheses
   } = useAppState();
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
+  const readableRelays = useMemo(() => relayList.filter((relay) => relay.inbox), [relayList]);
+  const readableRelaySignature = useMemo(
+    () => readableRelays.map((relay) => `${relay.url}\u0000${relay.name}`).join("\u0001"),
+    [readableRelays]
+  );
+
+  useEffect(() => {
+    if (!relayBootstrapReady) {
+      setLiveRelayNotesByUrl({});
+      return;
+    }
+
+    if (readableRelays.length === 0) {
+      setLiveRelayNotesByUrl({});
+      return;
+    }
+
+    setLiveRelayNotesByUrl((current) => pruneRelayNoteMap(current, readableRelays));
+
+    const rollup = startPulseRelayRollup({
+      relays: readableRelays,
+      currentRelayUrl: relayURL,
+      onRelayNotes: (relay, notes) => {
+        setLiveRelayNotesByUrl((current) => {
+          const previousNotes = current[relay.url];
+          if (areRelayNoteCollectionsEqual(previousNotes, notes)) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [relay.url]: notes
+          };
+        });
+      }
+    });
+
+    return () => {
+      rollup.stop();
+    };
+  }, [readableRelaySignature, readableRelays, relayBootstrapReady, relayURL]);
+
+  const liveRelayItems = useMemo(() => {
+    if (Object.keys(liveRelayNotesByUrl).length === 0) {
+      return [];
+    }
+
+    const relaysByUrl = new Map(readableRelays.map((relay) => [relay.url, relay]));
+
+    return mergeCrossRelayFeedItems(
+      ...Object.entries(liveRelayNotesByUrl).flatMap(([relayUrl, relayNotes]) => {
+        const relay = relaysByUrl.get(relayUrl);
+        if (!relay) {
+          return [];
+        }
+
+        const pulseNotes =
+          relayUrl === relayURL ? relayNotes.filter((note) => !isBeaconThreadNote(note, places)) : relayNotes;
+
+        return [
+          buildCrossRelayFeedItemsFromNotes(relay, pulseNotes, places, profiles, {
+            whyVisible:
+              relayUrl === relayURL
+                ? "Fetched live from the current relay."
+                : "Fetched live from a configured relay."
+          })
+        ];
+      })
+    );
+  }, [liveRelayNotesByUrl, places, profiles, readableRelays, relayURL]);
+
+  const pulseFeedItems = useMemo(
+    () => buildPulseFeedItems(mergeCrossRelayFeedItems(crossRelayItems, liveRelayItems), followedPubkeys),
+    [crossRelayItems, followedPubkeys, liveRelayItems]
+  );
 
   const note = getNote(searchParams.get("note") ?? "");
   const notePlace = note ? getPlace(note.geohash) : undefined;
@@ -31,12 +133,15 @@ export function PulseRoute() {
   const profilePlace = profile?.homeGeohash ? getPlace(profile.homeGeohash) : undefined;
   const profileParticipants = profilePlace ? getPlaceParticipants(profilePlace.geohash) : [];
   const recentNotes = listPulseLocalNotes(places, notes);
-  const mergedFeedCount = pulseFeedItems.length;
-  const visibleRelayCount = new Set(pulseFeedItems.map((item) => item.relayName)).size;
-  const laneCounts = pulseFeedItems.reduce<Record<string, number>>((counts, item) => {
-    counts[item.lane] = (counts[item.lane] ?? 0) + 1;
-    return counts;
-  }, {});
+  const laneFeedItems = pulseFeedItems.filter((item) => item.lane === selectedFeed);
+  const selectedWindowTopId = feedWindowTopByLane[selectedFeed];
+  const visibleFeedStartIndex = selectedWindowTopId
+    ? Math.max(0, laneFeedItems.findIndex((item) => item.id === selectedWindowTopId))
+    : 0;
+  const visibleFeedItems = laneFeedItems.slice(visibleFeedStartIndex, visibleFeedStartIndex + pulseFeedPageSize);
+  const visibleRelayCount = new Set(visibleFeedItems.map((item) => item.relayName)).size;
+  const newerFeedCount = visibleFeedStartIndex;
+  const olderFeedCount = Math.max(0, laneFeedItems.length - (visibleFeedStartIndex + visibleFeedItems.length));
   const pinnedNotes = places
     .map((place) => {
       const pinnedNote = place.pinnedNoteId ? getNote(place.pinnedNoteId) : undefined;
@@ -62,19 +167,6 @@ export function PulseRoute() {
       cohort: ReturnType<typeof buildCohortBeaconMetadata>;
     } => Boolean(entry));
 
-  function describeFeedLane(name: string) {
-    if (name === "Following") {
-      return `${laneCounts.Following ?? 0} follow-sourced items`;
-    }
-    if (name === "Local") {
-      return `${laneCounts.Local ?? 0} active relay items`;
-    }
-    if (name === "For You") {
-      return `${laneCounts["For You"] ?? 0} discovered relay items`;
-    }
-    return "Explainable feed lane";
-  }
-
   return (
     <section className="panel route-surface route-surface-pulse">
       <div className="route-header">
@@ -86,11 +178,24 @@ export function PulseRoute() {
           </p>
         </div>
         <div className="route-header-meta">
-          <span className="thread-pill">{feedSegments.length} feed lanes</span>
-          <span className="thread-pill">{mergedFeedCount} merged items</span>
+          <span className="thread-pill">{pulseFeedItems.length} feed items</span>
           <span className="thread-pill live">{relaySyntheses.length} syntheses</span>
           <span className="thread-pill">{recentNotes.length} recent notes</span>
         </div>
+      </div>
+
+      <div className="pulse-feed-switcher" aria-label="Pulse feed selector">
+        {pulseFeedOptions.map((feedOption) => (
+          <button
+            key={feedOption}
+            className="secondary-button pulse-feed-button"
+            type="button"
+            aria-pressed={selectedFeed === feedOption}
+            onClick={() => setSelectedFeed(feedOption)}
+          >
+            {feedOption}
+          </button>
+        ))}
       </div>
 
       {note && noteStaysInWorld ? (
@@ -183,7 +288,7 @@ export function PulseRoute() {
               <article className="mini-card">
                 <strong>Nearby roster</strong>
                 <p>{profileParticipants.length} profiles visible in the same place thread.</p>
-                <small>{activeCall?.geohash === profilePlace.geohash ? "You are in this room." : "Room available."}</small>
+                <small>{connectedActiveCall?.geohash === profilePlace.geohash ? "You are in this room." : "Room available."}</small>
               </article>
             </div>
           ) : null}
@@ -258,17 +363,35 @@ export function PulseRoute() {
         </section>
       ) : null}
 
-      {pulseFeedItems.length > 0 ? (
+      {visibleFeedItems.length > 0 ? (
         <section className="pulse-section">
           <div className="detail-header">
             <div>
-              <p className="section-label">Phase 6</p>
-              <h3>Cross-relay merge</h3>
+              <p className="section-label">Pulse feed</p>
+              <h3>{selectedFeed}</h3>
             </div>
             <span className="thread-pill">{visibleRelayCount} visible relays</span>
           </div>
+          {newerFeedCount > 0 ? (
+            <div className="pulse-feed-pagination pulse-feed-pagination-top">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => {
+                  const nextStartIndex = Math.max(0, visibleFeedStartIndex - pulseFeedPageSize);
+                  setFeedWindowTopByLane((current) => ({
+                    ...current,
+                    [selectedFeed]: nextStartIndex === 0 ? null : laneFeedItems[nextStartIndex]?.id ?? null
+                  }));
+                }}
+              >
+                Show {Math.min(pulseFeedPageSize, newerFeedCount)} newer post
+                {Math.min(pulseFeedPageSize, newerFeedCount) === 1 ? "" : "s"}
+              </button>
+            </div>
+          ) : null}
           <div className="tile-list">
-            {pulseFeedItems.map((item) => {
+            {visibleFeedItems.map((item) => {
               const matchingPlace = getPlace(item.geohash);
               const matchingProfile = getProfile(item.authorPubkey);
 
@@ -281,33 +404,27 @@ export function PulseRoute() {
                         {item.relayName} · {item.placeTitle}
                       </p>
                     </div>
-                    <span className="thread-pill">{item.sourceLabel}</span>
+                    {item.postCount > 1 ? <span className="thread-pill">{item.postCount} posts</span> : null}
                   </header>
                   <p>{item.content}</p>
+                  {item.posts.length > 1 ? (
+                    <small>
+                      Also in this burst: {item.posts.slice(1, 3).map((post) => post.content).join(" • ")}
+                      {item.posts.length > 3 ? ` • +${item.posts.length - 3} more` : ""}
+                    </small>
+                  ) : null}
                   <small>
-                    {item.sourceLabel} · {item.whyVisible} Published at {item.publishedAt}.
+                    {item.sourceLabel} · {item.whyVisible}
+                    {item.postCount > 1 ? ` Bundled from ${item.postCount} recent posts.` : ""} Published at{" "}
+                    {item.publishedAt}.
                   </small>
                   <div className="action-row pulse-card-actions">
-                    <span className={item.local ? "thread-pill live" : "thread-pill"}>{item.lane}</span>
-                    {!item.local ? (
-                      <a className="secondary-link" href={item.relayUrl} target="_blank" rel="noreferrer">
-                        Open relay
-                      </a>
-                    ) : null}
-                    {item.noteId ? (
-                      <Link
-                        className="secondary-link"
-                        to={`/app/pulse?note=${encodeURIComponent(item.noteId)}`}
-                      >
-                        Open note
-                      </Link>
-                    ) : null}
                     {matchingPlace ? (
                       <Link
                         className="secondary-link"
                         to={`/app?beacon=${encodeURIComponent(item.geohash)}`}
                       >
-                        {item.local ? "Open beacon" : "Compare local beacon"}
+                        Compare local beacon
                       </Link>
                     ) : null}
                     {matchingProfile ? (
@@ -323,7 +440,31 @@ export function PulseRoute() {
               );
             })}
           </div>
+          {olderFeedCount > 0 ? (
+            <div className="pulse-feed-pagination">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => {
+                  const nextStartIndex = visibleFeedStartIndex + pulseFeedPageSize;
+                  setFeedWindowTopByLane((current) => ({
+                    ...current,
+                    [selectedFeed]: laneFeedItems[nextStartIndex]?.id ?? current[selectedFeed]
+                  }));
+                }}
+              >
+                Show {Math.min(pulseFeedPageSize, olderFeedCount)} older post
+                {Math.min(pulseFeedPageSize, olderFeedCount) === 1 ? "" : "s"}
+              </button>
+            </div>
+          ) : null}
         </section>
+      ) : laneFeedItems.length > 0 ? (
+        <article className="feature-card pulse-feed-empty-state">
+          <p className="section-label">Pulse feed</p>
+          <h3>No {selectedFeed.toLowerCase()} items yet.</h3>
+          <p className="muted">Switch feeds to check the other lane.</p>
+        </article>
       ) : null}
 
       {pinnedNotes.length > 0 ? (
@@ -382,28 +523,11 @@ export function PulseRoute() {
         </section>
       ) : null}
 
-      {feedSegments.length > 0 ? (
-        <div className="tile-list">
-          {feedSegments.map((segment) => (
-            <article key={segment.name} className="tile-card pulse-card">
-              <header>
-                <div>
-                  <strong>{segment.name}</strong>
-                  <p className="tile-kicker">{describeFeedLane(segment.name)}</p>
-                </div>
-              </header>
-              <p>{segment.description}</p>
-            </article>
-          ))}
-        </div>
-      ) : null}
-
       {!note &&
       !profile &&
       relaySyntheses.length === 0 &&
       pulseFeedItems.length === 0 &&
-      pinnedNotes.length === 0 &&
-      feedSegments.length === 0 ? (
+      pinnedNotes.length === 0 ? (
         <article className="feature-card">
           <p className="section-label">Pulse</p>
           <h3>No feed activity yet.</h3>
@@ -412,4 +536,33 @@ export function PulseRoute() {
       ) : null}
     </section>
   );
+}
+
+function pruneRelayNoteMap(current: Record<string, GeoNote[]>, readableRelays: { url: string }[]) {
+  const readableRelayUrls = new Set(readableRelays.map((relay) => relay.url));
+  const nextEntries = Object.entries(current).filter(([relayUrl]) => readableRelayUrls.has(relayUrl));
+
+  if (nextEntries.length === Object.keys(current).length) {
+    return current;
+  }
+
+  return Object.fromEntries(nextEntries);
+}
+
+function areRelayNoteCollectionsEqual(left: GeoNote[] | undefined, right: GeoNote[]) {
+  if (!left || left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((note, index) => {
+    const other = right[index];
+    return (
+      note.id === other?.id &&
+      note.geohash === other.geohash &&
+      note.authorPubkey === other.authorPubkey &&
+      note.content === other.content &&
+      note.createdAt === other.createdAt &&
+      note.replies === other.replies
+    );
+  });
 }

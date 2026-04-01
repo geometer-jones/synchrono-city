@@ -36,11 +36,18 @@ import { WorldRoute } from "./routes/world-route";
 type PlacePayload = NonNullable<BootstrapPayload["places"]>[number];
 type ProfilePayload = NonNullable<BootstrapPayload["profiles"]>[number];
 type NotePayload = NonNullable<BootstrapPayload["notes"]>[number];
-type FeedSegmentPayload = NonNullable<BootstrapPayload["feed_segments"]>[number];
 type RelayListPayload = NonNullable<BootstrapPayload["relay_list"]>[number];
 type CrossRelayItemPayload = NonNullable<BootstrapPayload["cross_relay_items"]>[number];
 
 const originalMatchMedia = window.matchMedia;
+
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: width
+  });
+}
 
 function createBootstrapPayload(overrides: Partial<BootstrapPayload> = {}): BootstrapPayload {
   return {
@@ -59,7 +66,6 @@ function createBootstrapPayload(overrides: Partial<BootstrapPayload> = {}): Boot
     places: [],
     profiles: [],
     notes: [],
-    feed_segments: [],
     cross_relay_items: [],
     ...overrides
   };
@@ -101,10 +107,6 @@ function createProfile(
 
 function createNote(note: NotePayload): NotePayload {
   return note;
-}
-
-function createFeedSegment(segment: FeedSegmentPayload): FeedSegmentPayload {
-  return segment;
 }
 
 function createRelayListEntry(entry: RelayListPayload): RelayListPayload {
@@ -250,11 +252,6 @@ function createPulseBootstrap(): BootstrapPayload {
         createdAt: "2026-03-18T18:20:00Z",
         replies: 4
       })
-    ],
-    feed_segments: [
-      createFeedSegment({ name: "Following", description: "Followed activity." }),
-      createFeedSegment({ name: "Local", description: "Active relay activity." }),
-      createFeedSegment({ name: "For You", description: "Discovered relay activity." })
     ],
     cross_relay_items: [
       createCrossRelayItem({
@@ -640,15 +637,120 @@ describe("app shell", () => {
     expect(screen.getByRole("link", { name: /host your own/i })).toBeInTheDocument();
   });
 
+  it("auto-generates a local keypair when entering the city without stored keys", async () => {
+    const originalLocalStorage = window.localStorage;
+    const storage = new Map<string, string>();
+
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+        clear: () => {
+          storage.clear();
+        }
+      }
+    });
+
+    try {
+      const { user } = renderRouter("/");
+
+      expect(window.localStorage.getItem("synchrono-city.local-keyring")).toBeNull();
+
+      await user.click(screen.getByRole("button", { name: /enter the city/i }));
+
+      expect(await screen.findByRole("heading", { level: 1, name: /synchrono\.city/i })).toBeInTheDocument();
+
+      const stored = JSON.parse(window.localStorage.getItem("synchrono-city.local-keyring") ?? "null") as {
+        activePublicKeyNpub: string;
+        encrypted: boolean;
+        keys: Array<{ source: string; publicKeyNpub: string }>;
+      };
+
+      expect(stored.encrypted).toBe(false);
+      expect(stored.activePublicKeyNpub).toMatch(/^npub1/);
+      expect(stored.keys).toHaveLength(1);
+      expect(stored.keys[0]).toMatchObject({
+        source: "generated",
+        publicKeyNpub: stored.activePublicKeyNpub
+      });
+    } finally {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: originalLocalStorage
+      });
+    }
+  });
+
+  it("preserves an existing local keypair when entering the city", async () => {
+    const existingKey = importLocalKeyMaterial(
+      "1111111111111111111111111111111111111111111111111111111111111111"
+    );
+    const originalLocalStorage = window.localStorage;
+    const storage = new Map<string, string>();
+
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+        clear: () => {
+          storage.clear();
+        }
+      }
+    });
+
+    try {
+      window.localStorage.setItem(
+        "synchrono-city.local-keyring",
+        JSON.stringify({
+          activePublicKeyNpub: existingKey.publicKeyNpub,
+          encrypted: false,
+          keys: [existingKey]
+        })
+      );
+
+      const { user } = renderRouter("/");
+
+      await user.click(screen.getByRole("button", { name: /enter the city/i }));
+
+      expect(await screen.findByRole("heading", { level: 1, name: /synchrono\.city/i })).toBeInTheDocument();
+
+      const stored = JSON.parse(window.localStorage.getItem("synchrono-city.local-keyring") ?? "null") as {
+        activePublicKeyNpub: string;
+        keys: Array<{ publicKeyNpub: string }>;
+      };
+
+      expect(stored.activePublicKeyNpub).toBe(existingKey.publicKeyNpub);
+      expect(stored.keys).toHaveLength(1);
+      expect(stored.keys[0]?.publicKeyNpub).toBe(existingKey.publicKeyNpub);
+    } finally {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: originalLocalStorage
+      });
+    }
+  });
+
   it("renders the world route with beacon metadata", async () => {
     renderRouter("/app", { bootstrapPayload: createWorldBootstrap() });
 
-    expect(screen.getByRole("heading", { name: /synchrono\.city/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: /synchrono\.city/i })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /warehouse annex 9q8yym has 0 notes and 1 live participants/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /audio fallback 9q8yyt has 0 notes and 1 live participants/i })).toBeInTheDocument();
-    expect(screen.getByLabelText(/synchrono city manifesto/i)).toBeInTheDocument();
-    expect(screen.getByText(/amid exploding sovereign debt/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/world overview/i)).toBeInTheDocument();
+    expect(screen.getByText(/synchrono\.city is an open source stack that establishes a standard/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/beacon card civic plaza/i)).toBeInTheDocument();
   });
 
@@ -797,6 +899,76 @@ describe("app shell", () => {
     expect(screen.getByRole("button", { name: /camera on/i })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("keeps the call overlay and live stage hidden until LiveKit actually connects", async () => {
+    window.nostr = {
+      getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
+      signEvent: vi.fn().mockImplementation(async (event) => ({
+        ...event,
+        id: `signed-${event.created_at}`,
+        pubkey: "npub1operator",
+        sig: "sig"
+      }))
+    };
+
+    let rejectConnect: ((reason?: unknown) => void) | undefined;
+    liveKitMocks.connectLiveKitSessionMock.mockReset();
+    liveKitMocks.connectLiveKitSessionMock.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectConnect = reject;
+        })
+    );
+
+    mockFetchWithBootstrap(async (url) => {
+      if (url.pathname === "/api/v1/token") {
+        return jsonResponse({
+          decision: "allow",
+          reason: "room_permission",
+          token: {
+            token: "jwt-token",
+            identity: "npub1scout",
+            room_id: "geo:npub1operator:9q8yyk",
+            livekit_url: "ws://livekit.example.test",
+            expires_at: "2026-03-20T12:10:00Z",
+            grants: {
+              room_join: true,
+              can_publish: true,
+              can_subscribe: true
+            }
+          }
+        });
+      }
+
+      return undefined;
+    }, createWorldBootstrap());
+
+    const { user } = renderRouter("/app", { bootstrapPayload: createWorldBootstrap() });
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /civic plaza 9q8yyk has 3 notes and 3 live participants/i
+      })
+    );
+    await screen.findByLabelText(/beacon card civic plaza/i);
+    await user.click(screen.getByRole("button", { name: /join call/i }));
+
+    await waitFor(() => {
+      expect(liveKitMocks.connectLiveKitSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.queryByLabelText(/live call bar/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/beacon call media streams/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /leave call/i })).not.toBeInTheDocument();
+
+    rejectConnect?.(new Error("Unable to connect to the LiveKit room."));
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Unable to connect to the LiveKit room.")).toHaveLength(1);
+    });
+    expect(screen.queryByLabelText(/live call bar/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/beacon call media streams/i)).not.toBeInTheDocument();
+  });
+
   it("keeps denied joins out of active call mode and only shows the snackbar once", async () => {
     window.nostr = {
       getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
@@ -866,7 +1038,8 @@ describe("app shell", () => {
     await screen.findByLabelText(/beacon card civic plaza/i);
     await user.click(screen.getByRole("button", { name: /join call/i }));
 
-    expect((await screen.findAllByRole("button", { name: /leave call/i })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /leave call/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/live call bar/i)).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByText(/using fallback room\. server unavailable\./i)).not.toBeInTheDocument()
     );
@@ -1149,20 +1322,338 @@ describe("app shell", () => {
     expect(within(civicPlazaCard).queryByRole("button", { name: /leave call/i })).not.toBeInTheDocument();
   });
 
-  it("renders a merged phase 6 feed alongside synthesis and editorial sections in pulse", async () => {
+  it("switches the pulse feed between For You and Following lanes", async () => {
     renderRouter("/app/pulse", { bootstrapPayload: createPulseBootstrap() });
+    const user = userEvent.setup();
 
     expect(await screen.findByRole("heading", { name: /ai synthesis/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /cross-relay merge/i })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /operator pins/i })).toBeInTheDocument();
     expect(screen.getAllByText(/tenant organizing thread with a pinned logistics note and a live room\./i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/local relay/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/mission mesh/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /source beacon · aurora vale/i })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /open note/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /view author/i })).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: /compare local beacon/i })).toHaveLength(2);
-    expect(screen.getAllByRole("link", { name: /open relay/i })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "For You" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("heading", { name: "For You" })).toBeInTheDocument();
+    expect(screen.getByText(/harbor dispatch/i)).toBeInTheDocument();
+    expect(screen.queryByText(/mission mesh/i)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /compare local beacon/i })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /open relay/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Following" }));
+
+    expect(screen.getByRole("button", { name: "For You" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("heading", { name: "Following" })).toBeInTheDocument();
+    expect(screen.getByText(/mission mesh/i)).toBeInTheDocument();
+    expect(screen.queryByText(/harbor dispatch/i)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /compare local beacon/i })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /open relay/i })).not.toBeInTheDocument();
+  });
+
+  it("bundles bursty Pulse posts into a single card", async () => {
+    renderRouter("/app/pulse", {
+      bootstrapPayload: createBootstrapPayload({
+        places: [createPlace({ geohash: "9q8yyk", title: "Civic plaza" })],
+        cross_relay_items: [
+          createCrossRelayItem({
+            id: "burst-new",
+            relayName: "Mission Mesh",
+            relayUrl: "wss://mission-mesh.example/relay",
+            authorPubkey: "npub1tala",
+            authorName: "Tala North",
+            geohash: "9q8yyk",
+            placeTitle: "Civic plaza",
+            content: "Latest update from the east stairs.",
+            publishedAt: "2026-03-18T18:20:00Z",
+            sourceLabel: "Direct follow",
+            whyVisible: "Same public tile."
+          }),
+          createCrossRelayItem({
+            id: "burst-old",
+            relayName: "Mission Mesh",
+            relayUrl: "wss://mission-mesh.example/relay",
+            authorPubkey: "npub1tala",
+            authorName: "Tala North",
+            geohash: "9q8yyk",
+            placeTitle: "Civic plaza",
+            content: "Earlier update from the east stairs.",
+            publishedAt: "2026-03-18T18:05:00Z",
+            sourceLabel: "Direct follow",
+            whyVisible: "Same public tile."
+          })
+        ]
+      })
+    });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Following" }));
+
+    expect(await screen.findByText(/latest update from the east stairs\./i)).toBeInTheDocument();
+    expect(screen.getByText(/also in this burst: earlier update from the east stairs\./i)).toBeInTheDocument();
+    expect(screen.getByText(/^2 posts$/i)).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /compare local beacon/i })).toHaveLength(1);
+  });
+
+  it("pages pulse feed in 30-item windows with newer posts above older posts", async () => {
+    const pagedItems = Array.from({ length: 35 }, (_, index) =>
+      createCrossRelayItem({
+        id: `paged-${index + 1}`,
+        relayName: "Harbor Dispatch",
+        relayUrl: "wss://harbor-dispatch.example/relay",
+        authorPubkey: `npub1paged${index + 1}`,
+        authorName: `Pager ${index + 1}`,
+        geohash: "9q8yyk",
+        placeTitle: "Civic plaza",
+        content: `Paged pulse item ${index + 1}`,
+        publishedAt: new Date(Date.UTC(2026, 2, 18, 18, 59 - index, 0)).toISOString(),
+        sourceLabel: "Relay list",
+        whyVisible: "Configured relay surfaced it."
+      })
+    );
+
+    renderRouter("/app/pulse", {
+      bootstrapPayload: createBootstrapPayload({
+        relay_list: [
+          createRelayListEntry({
+            name: "Synchrono City Local",
+            url: "ws://localhost:8080",
+            inbox: false,
+            outbox: true
+          })
+        ],
+        places: [createPlace({ geohash: "9q8yyk", title: "Civic plaza" })],
+        cross_relay_items: pagedItems
+      })
+    });
+    const user = userEvent.setup();
+
+    expect(await screen.findByText(/^Paged pulse item 1$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Paged pulse item 30$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Paged pulse item 31$/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /show 5 older posts/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show 5 older posts/i }));
+
+    expect(screen.getByRole("button", { name: /show 30 newer posts/i })).toBeInTheDocument();
+    expect(screen.queryByText(/^Paged pulse item 1$/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/^Paged pulse item 31$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Paged pulse item 35$/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show 30 newer posts/i }));
+
+    expect(await screen.findByText(/^Paged pulse item 1$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Paged pulse item 31$/i)).not.toBeInTheDocument();
+  });
+
+  it("aggregates live kind 1 notes from configured relays on the pulse page", async () => {
+    const relaySocketMock = createRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    const localAuthor = importLocalKeyMaterial(
+      "abababababababababababababababababababababababababababababababab"
+    );
+    const remoteAuthor = importLocalKeyMaterial(
+      "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    );
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      renderRouter("/app/pulse", {
+        bootstrapPayload: createBootstrapPayload({
+          relay_list: [
+            createRelayListEntry({
+              name: "Synchrono City Local",
+              url: "ws://localhost:8080",
+              inbox: true,
+              outbox: true
+            }),
+            createRelayListEntry({
+              name: "Mission Mesh",
+              url: "wss://mission-mesh.example/relay",
+              inbox: true,
+              outbox: true
+            })
+          ],
+          places: [createPlace({ geohash: "9q8yyk", title: "Civic plaza" })]
+        })
+      });
+
+      await waitFor(() => {
+        expect(
+          relaySocketMock.instances.filter((instance) => instance.sentMessages[0]?.includes('"kinds":[1]')).length
+        ).toBeGreaterThanOrEqual(2);
+      });
+
+      const localRequestInstance = relaySocketMock.instances
+        .filter((instance) => instance.url === "ws://localhost:8080/" && instance.sentMessages[0]?.includes('"kinds":[1]'))
+        .at(-1);
+      const remoteRequestInstance = relaySocketMock.instances
+        .filter(
+          (instance) =>
+            instance.url === "wss://mission-mesh.example/relay" && instance.sentMessages[0]?.includes('"kinds":[1]')
+        )
+        .at(-1);
+
+      expect(localRequestInstance).toBeTruthy();
+      expect(remoteRequestInstance).toBeTruthy();
+
+      const localRequestPayload = JSON.parse(String(localRequestInstance?.sentMessages[0])) as [string, string];
+      const remoteRequestPayload = JSON.parse(String(remoteRequestInstance?.sentMessages[0])) as [string, string];
+
+      localRequestInstance?.deliverMessage([
+        "EVENT",
+        localRequestPayload[1],
+        {
+          id: "local-beacon-note",
+          pubkey: localAuthor.publicKeyHex,
+          created_at: 100,
+          kind: 1,
+          tags: [["g", "9q8yyk"]],
+          content: "Local beacon note should stay in World.",
+          sig: "sig-local"
+        }
+      ]);
+      localRequestInstance?.deliverMessage(["EOSE", localRequestPayload[1]]);
+
+      remoteRequestInstance?.deliverMessage([
+        "EVENT",
+        remoteRequestPayload[1],
+        {
+          id: "remote-pulse-note",
+          pubkey: remoteAuthor.publicKeyHex,
+          created_at: 200,
+          kind: 1,
+          tags: [["g", "9q8yyk"]],
+          content: "Remote live note from Mission Mesh.",
+          sig: "sig-remote"
+        }
+      ]);
+      remoteRequestInstance?.deliverMessage(["EOSE", remoteRequestPayload[1]]);
+
+      expect(await screen.findByText(/remote live note from mission mesh\./i)).toBeInTheDocument();
+      expect(screen.getAllByText(/mission mesh/i).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/local beacon note should stay in world\./i)).not.toBeInTheDocument();
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  it("keeps non-geotagged outside-relay notes visible in Pulse", async () => {
+    const relaySocketMock = createRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    const remoteAuthor = importLocalKeyMaterial(
+      "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+    );
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      renderRouter("/app/pulse", {
+        bootstrapPayload: createBootstrapPayload({
+          relay_list: [
+            createRelayListEntry({
+              name: "Synchrono City Local",
+              url: "ws://localhost:8080",
+              inbox: true,
+              outbox: true
+            }),
+            createRelayListEntry({
+              name: "Mission Mesh",
+              url: "wss://mission-mesh.example/relay",
+              inbox: true,
+              outbox: true
+            })
+          ]
+        })
+      });
+
+      await waitFor(() => {
+        expect(
+          relaySocketMock.instances.filter((instance) => instance.sentMessages[0]?.includes('"kinds":[1]')).length
+        ).toBeGreaterThanOrEqual(2);
+      });
+
+      const remoteRequestInstance = relaySocketMock.instances
+        .filter(
+          (instance) =>
+            instance.url === "wss://mission-mesh.example/relay" && instance.sentMessages[0]?.includes('"kinds":[1]')
+        )
+        .at(-1);
+
+      expect(remoteRequestInstance).toBeTruthy();
+
+      const remoteRequestPayload = JSON.parse(String(remoteRequestInstance?.sentMessages[0])) as [string, string];
+
+      remoteRequestInstance?.deliverMessage([
+        "EVENT",
+        remoteRequestPayload[1],
+        {
+          id: "remote-network-note",
+          pubkey: remoteAuthor.publicKeyHex,
+          created_at: 200,
+          kind: 1,
+          tags: [],
+          content: "Remote network note without a geohash tag.",
+          sig: "sig-remote"
+        }
+      ]);
+      remoteRequestInstance?.deliverMessage(["EOSE", remoteRequestPayload[1]]);
+
+      expect(await screen.findByText(/remote network note without a geohash tag\./i)).toBeInTheDocument();
+      expect(screen.getByText(/mission mesh · wider network/i)).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /compare local beacon/i })).not.toBeInTheDocument();
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+
+  it("waits for bootstrap before opening pulse relay sockets", async () => {
+    const relaySocketMock = createRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    let resolveBootstrap!: (response: Response) => void;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = resolveRequestURL(input);
+
+      if (url.pathname === "/api/v1/social/bootstrap") {
+        return await new Promise<Response>((resolve) => {
+          resolveBootstrap = resolve;
+        });
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+    });
+
+    try {
+      renderRouter("/app/pulse");
+
+      await Promise.resolve();
+      expect(relaySocketMock.instances).toHaveLength(0);
+
+      resolveBootstrap(
+        jsonResponse(
+          createBootstrapPayload({
+            relay_name: "Remote Relay",
+            relay_url: "wss://relay.example.test",
+            relay_list: [
+              createRelayListEntry({
+                name: "Remote Relay",
+                url: "wss://relay.example.test",
+                inbox: true,
+                outbox: true
+              })
+            ]
+          })
+        )
+      );
+
+      await waitFor(() =>
+        expect(relaySocketMock.instances.some((instance) => instance.url === "wss://relay.example.test/")).toBe(true)
+      );
+      expect(relaySocketMock.instances.some((instance) => instance.url === "ws://localhost:8080/")).toBe(false);
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
   });
 
   it("renders explicit empty states when bootstrap data is empty", async () => {
@@ -1202,17 +1693,142 @@ describe("app shell", () => {
 
     renderRouter("/app/settings");
 
-    expect(screen.getByRole("button", { name: /toggle appearance section/i })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: /toggle keys section/i })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: /toggle relays section/i })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: /toggle admin section/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: /toggle appearance section/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /toggle keys section/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /toggle relays section/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /toggle admin section/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^appearance$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^keys$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^relays$/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^admin$/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /dark/i })).toBeChecked();
-    expect(screen.getByText(/dark applied/i)).toBeInTheDocument();
+    expect(screen.getByText(/^theme$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/dark applied/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/choose whether the client stays dark/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/keep the client in the default low-light palette/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /show keys description/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /show relays description/i })).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /nostr uses asymmetric keypairs: your private key stays secret and signs events, while your public key identifies you so relays and other clients can verify authorship/i
+      )
+    ).not.toBeInTheDocument();
     expect((await screen.findAllByText(/synchrono city local/i)).length).toBeGreaterThan(0);
-    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
-    expect(screen.getByText(/connect or switch to the relay operator pubkey to unlock admin controls and review relay health/i)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /operator pubkey required/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /admin controls open once the current session or connected signer matches the relay operator pubkey/i
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/connect or switch to the relay operator pubkey to unlock admin controls and review relay health/i)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^admin access$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^relay health$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^guest list$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^audit log$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /connect signer/i })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /synchrono city local inbox/i })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /synchrono city local outbox/i })).toBeChecked();
+  });
+
+  it("shows only the locked admin notice when the relay operator pubkey is unavailable", async () => {
+    mockFetchWithBootstrap(
+      (url) => {
+        if (url.pathname === "/healthz") {
+          return jsonResponse({
+            status: "ok",
+            relay_name: "Synchrono City Local",
+            relay_url: "ws://localhost:8080",
+            operator_pubkey: "",
+            timestamp: "2026-03-18T18:30:00Z"
+          });
+        }
+
+        return undefined;
+      },
+      createBootstrapPayload({
+        relay_operator_pubkey: ""
+      })
+    );
+
+    renderRouter("/app/settings");
+
+    expect(await screen.findByRole("heading", { name: /operator pubkey required/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /admin controls open once the current session or connected signer matches the relay operator pubkey/i
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/connect or switch to the relay operator pubkey to unlock admin controls and review relay health/i)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^admin access$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^relay health$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^guest list$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^audit log$/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /connect signer/i })).not.toBeInTheDocument();
+  });
+
+  it("shows key and relay descriptions in help popovers", async () => {
+    mockFetchWithBootstrap((url) => {
+      if (url.pathname === "/healthz") {
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Synchrono City Local",
+          relay_url: "ws://localhost:8080",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-18T18:30:00Z"
+        });
+      }
+
+      return undefined;
+    });
+
+    const { user } = renderRouter("/app/settings");
+
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /nostr uses asymmetric keypairs: your private key stays secret and signs events, while your public key identifies you so relays and other clients can verify authorship/i
+      )
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/relays are the servers that store and forward nostr events between clients/i)
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /your client publishes notes, profile updates, and reactions to relays, then reads from relays to discover posts and people/i
+      )
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show keys description/i }));
+    const keysDialog = await screen.findByRole("dialog", { name: /keys description/i });
+    expect(keysDialog).not.toHaveAttribute("aria-modal", "true");
+    expect(
+      within(keysDialog).getByText(
+        /nostr uses asymmetric keypairs: your private key stays secret and signs events, while your public key identifies you so relays and other clients can verify authorship/i
+      )
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /keys description/i })).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: /show relays description/i }));
+    const relaysDialog = await screen.findByRole("dialog", { name: /relays description/i });
+    expect(relaysDialog).not.toHaveAttribute("aria-modal", "true");
+    expect(
+      within(relaysDialog).getByText(/relays are the servers that store and forward nostr events between clients/i)
+    ).toBeInTheDocument();
+    expect(
+      within(relaysDialog).getByText(
+        /your client publishes notes, profile updates, and reactions to relays, then reads from relays to discover posts and people/i
+      )
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /hide relays description/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /relays description/i })).not.toBeInTheDocument());
   });
 
   it("renders relay cards with inbox and outbox flags in settings", async () => {
@@ -1247,11 +1863,95 @@ describe("app shell", () => {
 
     renderRouter("/app/settings");
 
-    expect(await screen.findByRole("heading", { name: /2 relays configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     expect(screen.getAllByText("ws://localhost:8080").length).toBeGreaterThan(0);
-    expect(screen.getByText("wss://mission.example")).toBeInTheDocument();
+    expect(await screen.findByText("wss://mission.example")).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /mission mesh inbox/i })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /mission mesh outbox/i })).not.toBeChecked();
+  });
+
+  it("persists primary relay inbox and outbox changes in settings", async () => {
+    mockFetchWithBootstrap((url) => {
+      if (url.pathname === "/healthz") {
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Synchrono City Local",
+          relay_url: "ws://localhost:8080",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-18T18:30:00Z"
+        });
+      }
+
+      return undefined;
+    }, createBootstrapPayload({
+      relay_list: [
+        createRelayListEntry({
+          name: "Synchrono City Local",
+          url: "ws://localhost:8080",
+          inbox: true,
+          outbox: true
+        })
+      ]
+    }));
+
+    const originalLocalStorage = window.localStorage;
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string) => {
+          storage.delete(key);
+        },
+        clear: () => {
+          storage.clear();
+        }
+      }
+    });
+
+    try {
+      const { user } = renderRouter("/app/settings");
+
+      const primaryInbox = await screen.findByRole("checkbox", { name: /synchrono city local inbox/i });
+      const primaryOutbox = screen.getByRole("checkbox", { name: /synchrono city local outbox/i });
+
+      expect(primaryInbox).toBeChecked();
+      expect(primaryOutbox).toBeChecked();
+
+      await user.click(primaryInbox);
+      await user.click(primaryOutbox);
+
+      await waitFor(() => {
+        expect(primaryInbox).not.toBeChecked();
+        expect(primaryOutbox).not.toBeChecked();
+      });
+
+      await waitFor(() => {
+        expect(window.localStorage.getItem("synchrono-city.relay-list-overrides.v1")).not.toBeNull();
+      });
+
+      expect(
+        JSON.parse(window.localStorage.getItem("synchrono-city.relay-list-overrides.v1") ?? "null")
+      ).toMatchObject({
+        added: [
+          {
+            name: "Synchrono City Local",
+            url: "ws://localhost:8080",
+            inbox: false,
+            outbox: false
+          }
+        ],
+        removed: []
+      });
+    } finally {
+      Object.defineProperty(window, "localStorage", {
+        configurable: true,
+        value: originalLocalStorage
+      });
+    }
   });
 
   it("adds and removes relays from the settings relay list", async () => {
@@ -1271,18 +1971,21 @@ describe("app shell", () => {
 
     const { user } = renderRouter("/app/settings");
 
-    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     await user.type(screen.getByLabelText(/relay name/i), "Mission Mesh");
     await user.type(screen.getByLabelText(/relay url/i), "wss://mission.example/relay");
     await user.click(screen.getByRole("button", { name: /add relay/i }));
 
-    expect(await screen.findByRole("heading", { name: /2 relays configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     expect(screen.getByText("wss://mission.example/relay")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /remove mission mesh/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /remove mission mesh/i })).toHaveClass("danger-button");
 
     await user.click(screen.getByRole("button", { name: /remove mission mesh/i }));
+    const removeDialog = await screen.findByRole("dialog", { name: /remove relay\?/i });
+    expect(within(removeDialog).getByText(/mission mesh/i)).toBeInTheDocument();
+    await user.click(within(removeDialog).getByRole("button", { name: /^remove$/i }));
 
-    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     expect(screen.queryByText("wss://mission.example/relay")).not.toBeInTheDocument();
   });
 
@@ -1335,7 +2038,7 @@ describe("app shell", () => {
 
     renderRouter("/app/settings");
 
-    expect(await screen.findByRole("heading", { name: /2 relays configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     expect(screen.getByText("wss://mission.example/relay")).toBeInTheDocument();
   });
 
@@ -1356,7 +2059,7 @@ describe("app shell", () => {
 
     const { user } = renderRouter("/app/settings");
 
-    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(window.localStorage.getItem(appearanceStorageKey)).toBe("dark");
 
@@ -1398,15 +2101,13 @@ describe("app shell", () => {
 
     expect(await screen.findByRole("radio", { name: /system/i })).toBeChecked();
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "light"));
-    expect(screen.getByText(/system mode is currently applying light/i)).toBeInTheDocument();
 
     colorScheme.setMatches(true);
 
     await waitFor(() => expect(document.documentElement).toHaveAttribute("data-theme", "dark"));
-    expect(screen.getByText(/system mode is currently applying dark/i)).toBeInTheDocument();
   });
 
-  it("toggles settings sections independently for the operator session", async () => {
+  it("renders settings sections without minimize buttons for the operator session", async () => {
     const operatorBootstrap = createOperatorBootstrap();
 
     mockFetchWithBootstrap((url) => {
@@ -1424,34 +2125,12 @@ describe("app shell", () => {
     }, operatorBootstrap);
 
     const { user } = renderRouter("/app/settings");
-
-    const keysToggle = screen.getByRole("button", { name: /toggle keys section/i });
-    const relaysToggle = screen.getByRole("button", { name: /toggle relays section/i });
-    const adminToggle = screen.getByRole("button", { name: /toggle admin section/i });
-
-    if (adminToggle.getAttribute("aria-expanded") !== "true") {
-      await user.click(adminToggle);
-    }
-    if (adminToggle.getAttribute("aria-expanded") !== "true") {
-      await user.click(adminToggle);
-    }
-    await waitFor(() => expect(adminToggle).toHaveAttribute("aria-expanded", "true"));
+    expect(screen.queryByRole("button", { name: /toggle keys section/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /toggle relays section/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /toggle admin section/i })).not.toBeInTheDocument();
     expect(await screen.findByText(/allow relay guests/i)).toBeInTheDocument();
-    expect(adminToggle).toHaveAttribute("aria-expanded", "true");
-
-    await user.click(keysToggle);
-    expect(keysToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: /generate keys/i })).not.toBeInTheDocument();
-    expect(relaysToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /generate keys/i })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /intelligence surface/i })).toBeInTheDocument();
-
-    await user.click(adminToggle);
-    expect(adminToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText(/allow relay guests/i)).not.toBeInTheDocument();
-
-    await user.click(relaysToggle);
-    expect(relaysToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("heading", { name: /intelligence surface/i })).not.toBeInTheDocument();
   });
 
   it("supports generating and importing local keys from the keys section", async () => {
@@ -1473,17 +2152,13 @@ describe("app shell", () => {
 
     const { user } = renderRouter("/app/settings");
 
-    expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
-    const keysSection = screen.getByRole("button", { name: /toggle keys section/i }).closest("section");
+    expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
+    const keysSection = screen.getByRole("heading", { name: /^keys$/i }).closest("section");
     if (!keysSection) {
       throw new Error("keys section missing");
     }
 
-    expect(
-      within(keysSection).getByText(
-        /manage browser-local keypairs and profile metadata; the active key controls note authorship and place presence/i
-      )
-    ).toBeInTheDocument();
+    expect(within(keysSection).getByRole("button", { name: /show keys description/i })).toBeInTheDocument();
     expect(within(keysSection).getByText(/no local keypairs stored in this browser/i)).toBeInTheDocument();
     expect(within(keysSection).queryByRole("button", { name: /remove key/i })).not.toBeInTheDocument();
 
@@ -1607,6 +2282,85 @@ describe("app shell", () => {
     expect(within(keysSection).queryByRole("button", { name: /remove key/i })).not.toBeInTheDocument();
   }, 30000);
 
+  it("keeps key detail selection available on narrow settings layouts without view profile buttons", async () => {
+    const importedKeys = importLocalKeyMaterial("1111111111111111111111111111111111111111111111111111111111111111");
+    const originalWidth = window.innerWidth;
+
+    setViewportWidth(800);
+    window.dispatchEvent(new Event("resize"));
+
+    try {
+      mockFetchWithBootstrap((url) => {
+        if (url.pathname === "/healthz") {
+          return jsonResponse({
+            status: "ok",
+            relay_name: "Synchrono City Local",
+            relay_url: "ws://localhost:8080",
+            operator_pubkey: "npub1operator",
+            timestamp: "2026-03-18T18:30:00Z"
+          });
+        }
+
+        return undefined;
+      });
+
+      const { user } = renderRouter("/app/settings");
+
+      expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
+      const keysSection = screen.getByRole("heading", { name: /^keys$/i }).closest("section");
+      if (!keysSection) {
+        throw new Error("keys section missing");
+      }
+
+      await user.click(within(keysSection).getByRole("button", { name: /generate keys/i }));
+
+      const generatedDetailPanel = within(keysSection).getByText(/^Pubkey$/i).closest("article");
+      if (!generatedDetailPanel) {
+        throw new Error("generated detail panel missing");
+      }
+
+      const generatedPubkey = within(within(generatedDetailPanel).getByText(/^Pubkey$/i).closest("tr") as HTMLElement)
+        .getByText(/^[0-9a-f]{64}$/i)
+        .textContent;
+      const generatedNpub = within(generatedDetailPanel).getAllByText(/^npub1/i)[0]?.textContent;
+      if (!generatedPubkey) {
+        throw new Error("generated pubkey missing");
+      }
+      if (!generatedNpub) {
+        throw new Error("generated npub missing");
+      }
+
+      await user.click(within(keysSection).getByRole("button", { name: /^import keys$/i }));
+      const importField = within(keysSection).getByPlaceholderText(/paste nsec1\.\.\. or 64-char hex private key/i);
+      await user.type(importField, "1111111111111111111111111111111111111111111111111111111111111111");
+      await user.click(within(keysSection).getByRole("button", { name: /import keys/i }));
+
+      expect(within(keysSection).queryByRole("button", { name: /view profile/i })).not.toBeInTheDocument();
+      expect(within(keysSection).getByText(importedKeys.publicKeyNpub)).toBeInTheDocument();
+      expect(within(keysSection).queryByText(generatedNpub)).not.toBeInTheDocument();
+
+      const generatedKeyCard = within(keysSection)
+        .getByText(`${generatedPubkey.slice(0, 8)}...${generatedPubkey.slice(-8)}`)
+        .closest("article");
+      if (!generatedKeyCard) {
+        throw new Error("generated key card missing");
+      }
+
+      const generatedKeySelectButton = generatedKeyCard.querySelector(".key-summary-select");
+      if (!(generatedKeySelectButton instanceof HTMLButtonElement)) {
+        throw new Error("generated key selection button missing");
+      }
+
+      await user.click(generatedKeySelectButton);
+
+      expect(within(keysSection).getByText(generatedNpub)).toBeInTheDocument();
+      expect(within(keysSection).queryByText(importedKeys.publicKeyNpub)).not.toBeInTheDocument();
+    } finally {
+      setViewportWidth(originalWidth);
+      window.dispatchEvent(new Event("resize"));
+    }
+  });
+
   it("publishes kind 0 metadata for a local keypair with a Blossom-hosted picture", async () => {
     const relaySocketMock = createRelayWebSocketMock();
     const originalWebSocket = globalThis.WebSocket;
@@ -1637,7 +2391,7 @@ describe("app shell", () => {
     try {
       const { user } = renderRouter("/app/settings");
 
-      expect(await screen.findByRole("heading", { name: /1 relay configured/i })).toBeInTheDocument();
+      expect(await screen.findByLabelText(/relay name/i)).toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: /generate keys/i }));
 
       const publishButton = await screen.findByRole("button", { name: /publish metadata/i });
@@ -2065,11 +2819,6 @@ describe("app shell", () => {
     const { user } = renderRouter("/app/settings");
 
     expect((await screen.findAllByText(/synchrono city local/i)).length).toBeGreaterThan(0);
-    const governanceToggle = screen.getByRole("button", { name: /toggle admin section/i });
-    if (governanceToggle.getAttribute("aria-expanded") !== "true") {
-      await user.click(governanceToggle);
-      await waitFor(() => expect(governanceToggle).toHaveAttribute("aria-expanded", "true"));
-    }
     await user.click(screen.getByRole("button", { name: /connect signer/i }));
 
     expect(await screen.findByText(/browser signer verified/i)).toBeInTheDocument();
@@ -2149,27 +2898,28 @@ describe("app shell", () => {
   it("shows error when admin auth is denied (403)", async () => {
     mockFetchWithBootstrap((url) => {
       if (url.pathname === "/healthz") {
-        return jsonResponse({ status: "ok", relay_name: "Test", relay_url: "ws://test", operator_pubkey: "npub1op", timestamp: "2026-03-20T00:00:00Z" });
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Test",
+          relay_url: "ws://test",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-20T00:00:00Z"
+        });
       }
       if (url.pathname === "/api/v1/admin/policy/check") {
         return new Response(JSON.stringify({ message: "Insufficient standing" }), { status: 403, headers: { "Content-Type": "application/json" } });
       }
       return undefined;
-    });
+    }, createOperatorBootstrap());
+
+    renderRouter("/app/settings", { bootstrapPayload: createOperatorBootstrap() });
+    await screen.findByRole("button", { name: /connect signer/i });
 
     window.nostr = {
       getPublicKey: vi.fn().mockResolvedValue("npub1unauthorized"),
       signEvent: vi.fn().mockImplementation(async (event) => ({ ...event, id: "sig", pubkey: "npub1unauthorized", sig: "sig" }))
     };
 
-    renderRouter("/app/settings");
-    await screen.findByRole("heading", { name: /1 relay configured/i });
-
-    const deniedAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
-    if (deniedAdminToggle.getAttribute("aria-expanded") !== "true") {
-      await userEvent.click(deniedAdminToggle);
-      await waitFor(() => expect(deniedAdminToggle).toHaveAttribute("aria-expanded", "true"));
-    }
     await userEvent.click(screen.getByRole("button", { name: /connect signer/i }));
 
     const alert = await screen.findByRole("alert");
@@ -2179,7 +2929,13 @@ describe("app shell", () => {
   it("shows error when pubkey validation fails", async () => {
     mockFetchWithBootstrap((url) => {
       if (url.pathname === "/healthz") {
-        return jsonResponse({ status: "ok", relay_name: "Test", relay_url: "ws://test", operator_pubkey: "npub1op", timestamp: "2026-03-20T00:00:00Z" });
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Test",
+          relay_url: "ws://test",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-20T00:00:00Z"
+        });
       }
       if (url.pathname === "/api/v1/admin/policy/check") {
         return jsonResponse({ decision: "allow", reason: "bootstrap_operator", standing: "owner", scope: "relay.admin", auth_mode: "nip98" });
@@ -2188,20 +2944,16 @@ describe("app shell", () => {
         return jsonResponse({ entries: [] });
       }
       return undefined;
-    });
+    }, createOperatorBootstrap());
+
+    const { user } = renderRouter("/app/settings", { bootstrapPayload: createOperatorBootstrap() });
+    await screen.findByRole("button", { name: /connect signer/i });
 
     window.nostr = {
       getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
       signEvent: vi.fn().mockImplementation(async (event) => ({ ...event, id: "sig", pubkey: "npub1operator", sig: "sig" }))
     };
 
-    const { user } = renderRouter("/app/settings");
-    await screen.findByRole("heading", { name: /1 relay configured/i });
-    const validationAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
-    if (validationAdminToggle.getAttribute("aria-expanded") !== "true") {
-      await user.click(validationAdminToggle);
-      await waitFor(() => expect(validationAdminToggle).toHaveAttribute("aria-expanded", "true"));
-    }
     await user.click(screen.getByRole("button", { name: /connect signer/i }));
     await screen.findByText(/browser signer verified/i);
 
@@ -2218,27 +2970,28 @@ describe("app shell", () => {
   it("shows error on network failure", async () => {
     mockFetchWithBootstrap((url) => {
       if (url.pathname === "/healthz") {
-        return jsonResponse({ status: "ok", relay_name: "Test Relay", relay_url: "ws://test", operator_pubkey: "npub1op", timestamp: "2026-03-20T00:00:00Z" });
+        return jsonResponse({
+          status: "ok",
+          relay_name: "Test Relay",
+          relay_url: "ws://test",
+          operator_pubkey: "npub1operator",
+          timestamp: "2026-03-20T00:00:00Z"
+        });
       }
       if (url.pathname !== "/api/v1/social/bootstrap") {
         throw new Error("Network error");
       }
       return undefined;
-    });
+    }, createOperatorBootstrap());
+
+    renderRouter("/app/settings", { bootstrapPayload: createOperatorBootstrap() });
+    await screen.findByRole("button", { name: /connect signer/i });
 
     window.nostr = {
       getPublicKey: vi.fn().mockResolvedValue("npub1operator"),
       signEvent: vi.fn().mockImplementation(async (event) => ({ ...event, id: "sig", pubkey: "npub1operator", sig: "sig" }))
     };
 
-    renderRouter("/app/settings");
-    await screen.findByRole("heading", { name: /1 relay configured/i });
-
-    const failureAdminToggle = screen.getByRole("button", { name: /toggle admin section/i });
-    if (failureAdminToggle.getAttribute("aria-expanded") !== "true") {
-      await userEvent.click(failureAdminToggle);
-      await waitFor(() => expect(failureAdminToggle).toHaveAttribute("aria-expanded", "true"));
-    }
     await userEvent.click(screen.getByRole("button", { name: /connect signer/i }));
 
     const alert = await screen.findByRole("alert");

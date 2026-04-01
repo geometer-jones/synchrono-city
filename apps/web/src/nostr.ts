@@ -1,6 +1,6 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
 
-import type { GeoNote, GeoNoteReaction, Place } from "./data";
+import { pulseNetworkGeohash, type GeoNote, type GeoNoteReaction, type Place } from "./data";
 import { devLogger } from "./dev-logger";
 import {
   bytesToHex,
@@ -11,7 +11,7 @@ import {
   normalizePublicKeyNpub
 } from "./nostr-utils";
 
-export type ProfileMetadataContent = {
+export type ProfileMetadataContent = Record<string, unknown> & {
   name?: string;
   picture?: string;
   about?: string;
@@ -657,6 +657,228 @@ export async function queryGeoNotes(relayURL: string, geohash: string): Promise<
   });
 }
 
+export async function queryRecentKindOneNotes(
+  relayURL: string,
+  options?: { limit?: number }
+): Promise<GeoNote[]> {
+  const normalizedRelayURL = normalizeRelayURL(relayURL);
+  const limit =
+    typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.floor(options.limit)
+      : 50;
+  const filter = { kinds: [1], limit };
+  devLogger.relay.querying(normalizedRelayURL, filter);
+
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(normalizedRelayURL);
+    const subscriptionID = `kind1-recent-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const notesByID = new Map<string, GeoNote>();
+    let settled = false;
+    let lastNotice = "";
+    const timeoutID = window.setTimeout(() => {
+      fail(new Error("Relay note query timed out."));
+    }, relayPublishTimeoutMs);
+
+    devLogger.ws.connecting(normalizedRelayURL);
+
+    const succeed = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutID);
+      try {
+        socket.close();
+      } catch {
+        // Ignore close failures during normal teardown.
+      }
+
+      devLogger.relay.queryComplete(normalizedRelayURL, notesByID.size);
+      resolve(finalizeQueriedGeoNotes(notesByID, new Map()));
+    };
+
+    const fail = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutID);
+      try {
+        socket.close();
+      } catch {
+        // Ignore close failures during error handling.
+      }
+
+      reject(error instanceof Error ? error : new Error("Relay note query failed."));
+    };
+
+    socket.addEventListener("open", () => {
+      devLogger.ws.connected(normalizedRelayURL);
+      devLogger.ws.sent(normalizedRelayURL, "REQ");
+      socket.send(JSON.stringify(["REQ", subscriptionID, filter]));
+    });
+
+    socket.addEventListener("message", (message) => {
+      try {
+        const payload = JSON.parse(String(message.data)) as unknown;
+        if (!Array.isArray(payload) || payload.length < 1) {
+          return;
+        }
+
+        devLogger.ws.message(normalizedRelayURL, payload[0]);
+
+        if (payload[0] === "NOTICE" && typeof payload[1] === "string") {
+          lastNotice = payload[1];
+          return;
+        }
+
+        if (payload[0] === "EVENT" && payload[1] === subscriptionID && isSignedKindOneEvent(payload[2])) {
+          const note = normalizeRelayKindOneNote(payload[2], pulseNetworkGeohash);
+          if (note) {
+            notesByID.set(note.id, note);
+          }
+          return;
+        }
+
+        if (payload[0] === "EOSE" && payload[1] === subscriptionID) {
+          socket.send(JSON.stringify(["CLOSE", subscriptionID]));
+          succeed();
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+
+    socket.addEventListener("error", () => {
+      devLogger.ws.error(normalizedRelayURL, "Connection error");
+      fail(new Error("Relay connection failed."));
+    });
+
+    socket.addEventListener("close", () => {
+      devLogger.ws.closed(normalizedRelayURL, lastNotice || "Connection closed");
+      if (!settled) {
+        fail(new Error(lastNotice || "Relay closed before returning notes."));
+      }
+    });
+  });
+}
+
+export async function queryAuthorKindOneNotes(
+  relayURL: string,
+  author: string,
+  options?: { limit?: number }
+): Promise<GeoNote[]> {
+  const normalizedRelayURL = normalizeRelayURL(relayURL);
+  const normalizedAuthor = normalizePublicKeyHex(author.trim());
+  if (!normalizedAuthor) {
+    return [];
+  }
+
+  const limit =
+    typeof options?.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
+      ? Math.floor(options.limit)
+      : 5;
+  const filter = { kinds: [1], authors: [normalizedAuthor], limit };
+  devLogger.relay.querying(normalizedRelayURL, filter);
+
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(normalizedRelayURL);
+    const subscriptionID = `kind1-author-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const notesByID = new Map<string, GeoNote>();
+    let settled = false;
+    let lastNotice = "";
+    const timeoutID = window.setTimeout(() => {
+      fail(new Error("Relay author note query timed out."));
+    }, relayPublishTimeoutMs);
+
+    devLogger.ws.connecting(normalizedRelayURL);
+
+    const succeed = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutID);
+      try {
+        socket.close();
+      } catch {
+        // Ignore close failures during normal teardown.
+      }
+
+      devLogger.relay.queryComplete(normalizedRelayURL, notesByID.size);
+      resolve(finalizeQueriedGeoNotes(notesByID, new Map()));
+    };
+
+    const fail = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutID);
+      try {
+        socket.close();
+      } catch {
+        // Ignore close failures during error handling.
+      }
+
+      reject(error instanceof Error ? error : new Error("Relay author note query failed."));
+    };
+
+    socket.addEventListener("open", () => {
+      devLogger.ws.connected(normalizedRelayURL);
+      devLogger.ws.sent(normalizedRelayURL, "REQ");
+      socket.send(JSON.stringify(["REQ", subscriptionID, filter]));
+    });
+
+    socket.addEventListener("message", (message) => {
+      try {
+        const payload = JSON.parse(String(message.data)) as unknown;
+        if (!Array.isArray(payload) || payload.length < 1) {
+          return;
+        }
+
+        devLogger.ws.message(normalizedRelayURL, payload[0]);
+
+        if (payload[0] === "NOTICE" && typeof payload[1] === "string") {
+          lastNotice = payload[1];
+          return;
+        }
+
+        if (payload[0] === "EVENT" && payload[1] === subscriptionID && isSignedKindOneEvent(payload[2])) {
+          const note = normalizeRelayKindOneNote(payload[2], pulseNetworkGeohash);
+          if (note) {
+            notesByID.set(note.id, note);
+          }
+          return;
+        }
+
+        if (payload[0] === "EOSE" && payload[1] === subscriptionID) {
+          socket.send(JSON.stringify(["CLOSE", subscriptionID]));
+          succeed();
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+
+    socket.addEventListener("error", () => {
+      devLogger.ws.error(normalizedRelayURL, "Connection error");
+      fail(new Error("Relay connection failed."));
+    });
+
+    socket.addEventListener("close", () => {
+      devLogger.ws.closed(normalizedRelayURL, lastNotice || "Connection closed");
+      if (!settled) {
+        fail(new Error(lastNotice || "Relay closed before returning author notes."));
+      }
+    });
+  });
+}
+
 async function computeEventId(event: SignedEventInput) {
   const serialized = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(serialized));
@@ -761,19 +983,7 @@ function parseProfileMetadataContent(content: string): ProfileMetadataContent | 
     }
 
     const record = parsed as Record<string, unknown>;
-    const metadata: ProfileMetadataContent = {};
-
-    if (typeof record.name === "string") {
-      metadata.name = record.name;
-    }
-    if (typeof record.picture === "string") {
-      metadata.picture = record.picture;
-    }
-    if (typeof record.about === "string") {
-      metadata.about = record.about;
-    }
-
-    return metadata;
+    return record as ProfileMetadataContent;
   } catch {
     return null;
   }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"testing"
 	"time"
@@ -706,6 +707,207 @@ func TestTokenRequiresRoomPermission(t *testing.T) {
 	}
 	if grants.Video.CanSubscribe == nil || !*grants.Video.CanSubscribe {
 		t.Fatalf("expected canSubscribe true, got %+v", grants.Video.CanSubscribe)
+	}
+}
+
+func TestTokenAllowsJoinWhenOAuthIsConfiguredButNoGatePolicyRequiresIt(t *testing.T) {
+	policyStore := store.NewMemory()
+	srv := NewServer(config.Config{
+		LiveKitAPIKey:      "devkey",
+		LiveKitAPISecret:   "devsecret",
+		LiveKitURL:         "ws://livekit.example.test",
+		PrimaryOperatorPub: mustPublicKey(t, operatorSecretKey(t)),
+		SessionSecret:      "session-secret",
+		OAuthIssuerURL:     "https://issuer.example.test",
+		OAuthClientID:      "client-id",
+		OAuthClientSecret:  "client-secret",
+		OAuthRedirectURL:   "http://example.com/api/v1/oauth/callback",
+	}, policyStore)
+	seedSocialScene(t, srv,
+		[]social.Place{{
+			Geohash: "9q8yyk",
+			Title:   "Civic Plaza",
+			Tags:    []string{"beacon"},
+		}},
+		nil,
+		nil,
+		nil,
+	)
+
+	tokenPayload := []byte(`{"room_id":"beacon:9q8yyk"}`)
+	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/token", bytes.NewReader(tokenPayload))
+	withNIP98Auth(t, tokenReq, guestSecretKey(t), tokenPayload)
+	tokenRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(tokenRec, tokenReq)
+
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("expected token request 200, got %d body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var response struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+		Token    struct {
+			RoomID string `json:"room_id"`
+			Grants struct {
+				RoomJoin     bool `json:"room_join"`
+				CanPublish   bool `json:"can_publish"`
+				CanSubscribe bool `json:"can_subscribe"`
+			} `json:"grants"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if response.Decision != "allow" || response.Reason != "room_default_listener" {
+		t.Fatalf("expected room_default_listener allow, got %+v", response)
+	}
+	if response.Token.RoomID != "beacon:9q8yyk" {
+		t.Fatalf("expected room id beacon:9q8yyk, got %+v", response.Token)
+	}
+	if !response.Token.Grants.RoomJoin || !response.Token.Grants.CanPublish || !response.Token.Grants.CanSubscribe {
+		t.Fatalf("unexpected grants: %+v", response.Token.Grants)
+	}
+}
+
+func TestOAuthCallbackCreatesProofAndSelfProofsListReturnsIt(t *testing.T) {
+	var provider *httptest.Server
+	provider = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"issuer":                 provider.URL,
+				"authorization_endpoint": provider.URL + "/authorize",
+				"token_endpoint":         provider.URL + "/token",
+				"userinfo_endpoint":      provider.URL + "/userinfo",
+			})
+		case "/token":
+			_ = r.ParseForm()
+			if got := r.Form.Get("code"); got != "good-code" {
+				t.Fatalf("expected code good-code, got %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"access_token": "provider-access-token",
+				"token_type":   "Bearer",
+			})
+		case "/userinfo":
+			if got := r.Header.Get("Authorization"); got != "Bearer provider-access-token" {
+				t.Fatalf("expected bearer token, got %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"sub":                "user-123",
+				"preferred_username": "fieldscout",
+				"email":              "fieldscout@example.com",
+				"name":               "Field Scout",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	policyStore := store.NewMemory()
+	srv := NewServer(config.Config{
+		PrimaryOperatorPub: "operator",
+		SessionSecret:      "session-secret",
+		OAuthIssuerURL:     provider.URL,
+		OAuthClientID:      "client-id",
+		OAuthClientSecret:  "client-secret",
+		OAuthRedirectURL:   "http://example.com/api/v1/oauth/callback",
+	}, policyStore)
+
+	startPayload := []byte(`{"return_to":"/app/settings?from=test"}`)
+	startReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/v1/oauth/start", bytes.NewReader(startPayload))
+	startReq.Header.Set("Origin", "http://client.example.test")
+	withNIP98Auth(t, startReq, guestSecretKey(t), startPayload)
+	startRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(startRec, startReq)
+
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("expected oauth start 200, got %d body=%s", startRec.Code, startRec.Body.String())
+	}
+
+	var startResponse struct {
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResponse); err != nil {
+		t.Fatalf("decode oauth start response: %v", err)
+	}
+
+	authorizationURL, err := url.Parse(startResponse.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("parse authorization url: %v", err)
+	}
+	state := authorizationURL.Query().Get("state")
+	if state == "" {
+		t.Fatal("expected state in authorization url")
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/oauth/callback?state="+url.QueryEscape(state)+"&code=good-code", nil)
+	for _, cookie := range startRec.Result().Cookies() {
+		callbackReq.AddCookie(cookie)
+	}
+	callbackRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(callbackRec, callbackReq)
+
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("expected oauth callback redirect, got %d body=%s", callbackRec.Code, callbackRec.Body.String())
+	}
+	location := callbackRec.Header().Get("Location")
+	if location == "" {
+		t.Fatal("expected redirect location")
+	}
+	redirectURL, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect location: %v", err)
+	}
+	if redirectURL.Scheme != "http" || redirectURL.Host != "client.example.test" {
+		t.Fatalf("expected redirect back to client origin, got %s", location)
+	}
+	if redirectURL.Path != "/app/settings" {
+		t.Fatalf("expected redirect path /app/settings, got %s", location)
+	}
+	if redirectURL.Query().Get("oauth_status") != "success" {
+		t.Fatalf("expected oauth success redirect, got %s", location)
+	}
+	if redirectURL.Query().Get("key") == "" {
+		t.Fatalf("expected key param in redirect, got %s", location)
+	}
+
+	proofsReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/v1/me/proofs?proof_type=oauth", nil)
+	withNIP98Auth(t, proofsReq, guestSecretKey(t), nil)
+	proofsRec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(proofsRec, proofsReq)
+
+	if proofsRec.Code != http.StatusOK {
+		t.Fatalf("expected self proofs 200, got %d body=%s", proofsRec.Code, proofsRec.Body.String())
+	}
+
+	var proofsResponse struct {
+		Entries []struct {
+			SubjectPubkey string            `json:"subject_pubkey"`
+			ProofType     string            `json:"proof_type"`
+			ProofValue    string            `json:"proof_value"`
+			Metadata      map[string]string `json:"metadata"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(proofsRec.Body.Bytes(), &proofsResponse); err != nil {
+		t.Fatalf("decode proofs response: %v", err)
+	}
+
+	if len(proofsResponse.Entries) != 1 {
+		t.Fatalf("expected one proof entry, got %+v", proofsResponse.Entries)
+	}
+	if proofsResponse.Entries[0].ProofType != "oauth" {
+		t.Fatalf("unexpected proof type: %+v", proofsResponse.Entries[0])
+	}
+	if proofsResponse.Entries[0].Metadata["subject"] != "user-123" {
+		t.Fatalf("unexpected metadata: %+v", proofsResponse.Entries[0].Metadata)
 	}
 }
 

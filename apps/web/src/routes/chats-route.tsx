@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 
 import { useAppState } from "../app-state";
 import { ResizablePanels } from "../components/resizable-panels";
-import { compareDescendingTimestamps } from "../data";
+import { compareDescendingTimestamps, isConnectedLiveKitCall } from "../data";
 import { useNarrowViewport } from "../hooks/use-viewport";
+import type { AppShellOutletContext } from "./app-shell";
 import { BeaconAvatar, BeaconThreadPanel } from "./beacon-thread-panel";
 
 type InboxItem =
@@ -57,17 +58,22 @@ function formatThreadPreview(text: string) {
 export function ChatsRoute() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const appShellContext = useOutletContext<AppShellOutletContext | undefined>();
   const { activeCall, currentUser, getProfile, listBeaconThreads, listChatThreads, listNotesForBeacon } = useAppState();
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const threads = listChatThreads();
   const beaconThreads = listBeaconThreads();
   const isNarrowViewport = useNarrowViewport();
+  const mobileChatsResetToken = appShellContext?.mobileChatsResetToken ?? 0;
   const requestedBeaconGeohash = searchParams.get("beacon") ?? "";
   const beaconThreadsForInbox = useMemo(() => {
     const memberThreads = beaconThreads.filter((thread) => {
       const ownsBeacon = thread.ownerPubkey === currentUser.pubkey;
       const hasExplicitMembership = thread.memberPubkeys?.includes(currentUser.pubkey) ?? false;
       const authoredInBeacon = listNotesForBeacon(thread.geohash).some((note) => note.authorPubkey === currentUser.pubkey);
-      const joinedCall = activeCall?.geohash === thread.geohash && activeCall.participantPubkeys.includes(currentUser.pubkey);
+      const joinedCall =
+        connectedActiveCall?.geohash === thread.geohash &&
+        connectedActiveCall.participantPubkeys.includes(currentUser.pubkey);
 
       return ownsBeacon || hasExplicitMembership || thread.participants.includes(currentUser.pubkey) || authoredInBeacon || joinedCall;
     });
@@ -92,7 +98,7 @@ export function ChatsRoute() {
     }
 
     return sortedMemberThreads;
-  }, [activeCall, beaconThreads, currentUser.pubkey, listNotesForBeacon, requestedBeaconGeohash]);
+  }, [beaconThreads, connectedActiveCall, currentUser.pubkey, listNotesForBeacon, requestedBeaconGeohash]);
   const inboxItems = useMemo<InboxItem[]>(() => {
     const beaconItems: InboxItem[] = beaconThreadsForInbox.map((thread) => ({
       id: beaconItemID(thread.geohash),
@@ -134,7 +140,7 @@ export function ChatsRoute() {
     return inboxItems[0]?.id ?? null;
   });
   const [isNarrowThreadOpen, setIsNarrowThreadOpen] = useState(false);
-  const selectedItem = inboxItems.find((item) => item.id === selectedThreadId) ?? inboxItems[0] ?? null;
+  const previousRequestedBeaconGeohashRef = useRef(requestedBeaconGeohash);
   const shouldShowThreadList = !isNarrowViewport || !isNarrowThreadOpen;
   const shouldShowThreadDetail = !isNarrowViewport || isNarrowThreadOpen;
 
@@ -157,9 +163,32 @@ export function ChatsRoute() {
         return;
       }
 
+      if (isNarrowViewport && !requestedSelectionId && selectedThreadId === null) {
+        return;
+      }
+
       setSelectedThreadId(inboxItems[0].id);
     }
-  }, [inboxItems, requestedSelectionId, selectedThreadId]);
+  }, [inboxItems, isNarrowViewport, requestedSelectionId, selectedThreadId]);
+
+  useEffect(() => {
+    const previousRequestedBeaconGeohash = previousRequestedBeaconGeohashRef.current;
+    if (isNarrowViewport && previousRequestedBeaconGeohash && !requestedBeaconGeohash) {
+      setSelectedThreadId(null);
+      setIsNarrowThreadOpen(false);
+    }
+
+    previousRequestedBeaconGeohashRef.current = requestedBeaconGeohash;
+  }, [isNarrowViewport, requestedBeaconGeohash]);
+
+  useEffect(() => {
+    if (!isNarrowViewport || mobileChatsResetToken === 0) {
+      return;
+    }
+
+    setSelectedThreadId(null);
+    setIsNarrowThreadOpen(false);
+  }, [isNarrowViewport, mobileChatsResetToken]);
 
   function handleSelectThread(item: InboxItem) {
     setSelectedThreadId(item.id);
@@ -172,6 +201,19 @@ export function ChatsRoute() {
       setIsNarrowThreadOpen(true);
     }
   }
+
+  function handleReturnToChatsList() {
+    setSelectedThreadId(null);
+    setIsNarrowThreadOpen(false);
+    navigate("/app/chats");
+  }
+
+  function handleReturnToNarrowList() {
+    setSelectedThreadId(null);
+    setIsNarrowThreadOpen(false);
+  }
+
+  const selectedItem = selectedThreadId ? inboxItems.find((item) => item.id === selectedThreadId) ?? null : null;
 
   const threadListPanel = shouldShowThreadList ? (
     <div className="thread-scroll-panel thread-scroll-panel-list">
@@ -253,26 +295,27 @@ export function ChatsRoute() {
     </div>
   ) : null;
 
-  const narrowBackButton = isNarrowViewport ? (
-    <div className="action-row thread-detail-toolbar">
-      <button className="secondary-button" type="button" onClick={() => setIsNarrowThreadOpen(false)}>
-        Back to chats
-      </button>
-    </div>
-  ) : null;
+  const threadDetailPanelClassName =
+    selectedItem?.kind === "beacon"
+      ? "thread-scroll-panel thread-scroll-panel-detail thread-scroll-panel-detail-beacon"
+      : "thread-scroll-panel thread-scroll-panel-detail";
 
   const threadDetailPanel = shouldShowThreadDetail ? (
-    <div className="thread-scroll-panel thread-scroll-panel-detail">
+    <div className={threadDetailPanelClassName}>
       {selectedItem ? (
         selectedItem.kind === "beacon" ? (
           <div className="thread-detail-stack">
-            {narrowBackButton}
             <BeaconThreadPanel
               beaconGeohash={selectedItem.geohash}
-              avatarActionLabel={`Open ${selectedItem.title} in World`}
-              onActivateBeacon={(geohash) =>
-                navigate({ pathname: "/app", search: `?beacon=${encodeURIComponent(geohash)}` })
-              }
+              avatarActionLabel={isNarrowViewport ? "Return to chats" : `Open ${selectedItem.title} in World`}
+              onActivateBeacon={(geohash) => {
+                if (isNarrowViewport) {
+                  handleReturnToChatsList();
+                  return;
+                }
+
+                navigate({ pathname: "/app", search: `?beacon=${encodeURIComponent(geohash)}` });
+              }}
             />
           </div>
         ) : (
@@ -283,7 +326,7 @@ export function ChatsRoute() {
                 <h3>{selectedItem.title}</h3>
               </div>
               {isNarrowViewport ? (
-                <button className="secondary-button" type="button" onClick={() => setIsNarrowThreadOpen(false)}>
+                <button className="secondary-button" type="button" onClick={handleReturnToNarrowList}>
                   Back to chats
                 </button>
               ) : null}

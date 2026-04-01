@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../styles.css";
 import { AppShell } from "./app-shell";
@@ -14,6 +14,14 @@ vi.mock("../app-state", () => ({
 vi.mock("../components/call-overlay", () => ({
   CallOverlay: () => null
 }));
+
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: width
+  });
+}
 
 function findMediaRule(conditionText: string) {
   for (const styleSheet of Array.from(document.styleSheets)) {
@@ -59,6 +67,10 @@ function PulseRouteFixture() {
 }
 
 describe("AppShell", () => {
+  beforeEach(() => {
+    setViewportWidth(1024);
+  });
+
   it("does not reserve a layout box for bottom chrome when the mobile tab bar is absent", () => {
     const { container } = render(
       <MemoryRouter initialEntries={["/app"]}>
@@ -101,6 +113,27 @@ describe("AppShell", () => {
     expect(appShellRule?.style.getPropertyValue("padding-bottom")).toBe("0");
     expect(bottomChromeRule?.style.getPropertyValue("display")).toBe("grid");
     expect(bottomChromeRule?.style.getPropertyValue("padding")).toBe("0 var(--shell-chrome-padding-inline) 12px");
+  });
+
+  it("adds extra vertical padding to the mobile app bar", () => {
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="/app" element={<AppShell />}>
+            <Route index element={<div data-testid="route-content">world</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    const narrowRule = findMediaRule("(max-width: 860px)");
+
+    expect(narrowRule).not.toBeNull();
+
+    const appBarRule = findNestedStyleRule(narrowRule as CSSMediaRule, ".app-bar");
+
+    expect(appBarRule).not.toBeNull();
+    expect(appBarRule?.style.getPropertyValue("padding")).toBe("14px var(--shell-chrome-padding-inline)");
   });
 
   it("tightens the mobile nav spacing for very narrow screens", () => {
@@ -220,5 +253,61 @@ describe("AppShell", () => {
 
     await user.click(screen.getAllByRole("link", { name: "World" })[0]);
     expect(screen.getByTestId("route-location")).toHaveTextContent("/app?beacon=9q8yyk12");
+  });
+
+  it("returns the World tab to map mode on narrow screens", async () => {
+    setViewportWidth(540);
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app?beacon=9q8yyk12"]}>
+        <Routes>
+          <Route path="/app" element={<AppShell />}>
+            <Route
+              index
+              element={
+                <>
+                  <div>world</div>
+                  <LocationProbe />
+                </>
+              }
+            />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/app?beacon=9q8yyk12");
+
+    await user.click(screen.getAllByRole("link", { name: "World" })[0]);
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/app");
+  });
+
+  it("returns the Chats tab to the base inbox on narrow screens", async () => {
+    setViewportWidth(540);
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app/chats?beacon=9q8yyk12"]}>
+        <Routes>
+          <Route path="/app" element={<AppShell />}>
+            <Route
+              path="chats"
+              element={
+                <>
+                  <div>chats</div>
+                  <LocationProbe />
+                </>
+              }
+            />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/app/chats?beacon=9q8yyk12");
+
+    await user.click(screen.getAllByRole("link", { name: "Chats" })[0]);
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/app/chats");
   });
 });

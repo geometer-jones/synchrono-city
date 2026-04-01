@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/pubkeys"
@@ -13,6 +14,7 @@ import (
 type Service struct {
 	store                  store.Store
 	operatorPubkey         string
+	defaultMediaJoinProofs []string
 	defaultRoomGrantSource interface {
 		DefaultRoomGrants(roomID string) (bool, bool, bool)
 	}
@@ -44,6 +46,10 @@ func (s *Service) SetDefaultRoomGrantSource(source interface {
 	DefaultRoomGrants(roomID string) (bool, bool, bool)
 }) {
 	s.defaultRoomGrantSource = source
+}
+
+func (s *Service) SetDefaultMediaJoinProofTypes(proofTypes []string) {
+	s.defaultMediaJoinProofs = slices.Clone(proofTypes)
 }
 
 func (s *Service) CheckAdminAccess(ctx context.Context, subjectPubkey string) Decision {
@@ -355,6 +361,10 @@ func (s *Service) hasProofVerification(
 	return false, nil
 }
 
+func (s *Service) HasProofVerification(ctx context.Context, subjectPubkey, proofType string) (bool, error) {
+	return s.hasProofVerification(ctx, subjectPubkey, proofType)
+}
+
 func (s *Service) applyGatePolicy(
 	ctx context.Context,
 	subjectPubkey string,
@@ -363,7 +373,7 @@ func (s *Service) applyGatePolicy(
 	assignments []store.PolicyAssignment,
 	baseDecision Decision,
 ) Decision {
-	gatePolicy, err := s.store.LatestGatePolicy(ctx, capability, capabilityScope(capability))
+	gatePolicy, err := s.effectiveGatePolicy(ctx, capability)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return baseDecision
@@ -449,6 +459,26 @@ func (s *Service) applyGatePolicy(
 	baseDecision.Gates = gates
 	baseDecision.ProofRequirementMet = true
 	return baseDecision
+}
+
+func (s *Service) effectiveGatePolicy(ctx context.Context, capability string) (store.GatePolicy, error) {
+	gatePolicy, err := s.store.LatestGatePolicy(ctx, capability, capabilityScope(capability))
+	if err == nil {
+		return gatePolicy, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return store.GatePolicy{}, err
+	}
+
+	if capability == "media.join" && len(s.defaultMediaJoinProofs) > 0 {
+		return store.GatePolicy{
+			Capability: capability,
+			Scope:      capabilityScope(capability),
+			ProofTypes: slices.Clone(s.defaultMediaJoinProofs),
+		}, nil
+	}
+
+	return store.GatePolicy{}, store.ErrNotFound
 }
 
 func satisfiesGuestGate(standing string, assignments []store.PolicyAssignment) bool {

@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +17,9 @@ import (
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/config"
 	scLiveKit "github.com/peterwei/synchrono-city/apps/concierge/internal/livekit"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/nip98"
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/oauthflow"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/policy"
+	"github.com/peterwei/synchrono-city/apps/concierge/internal/pubkeys"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/relayauth"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/social"
 	"github.com/peterwei/synchrono-city/apps/concierge/internal/store"
@@ -35,6 +41,7 @@ type Server struct {
 	policyService                *policy.Service
 	relayAuth                    *relayauth.Evaluator
 	socialService                *social.Service
+	oauthService                 *oauthflow.Service
 	adminLimiter                 *rateLimiter
 }
 
@@ -44,6 +51,15 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 	tokenService.SetDefaultRoomGrantSource(socialService)
 	policyService := policy.NewService(policyStore, cfg.PrimaryOperatorPub)
 	policyService.SetDefaultRoomGrantSource(socialService)
+	oauthService := oauthflow.New(oauthflow.Config{
+		IssuerURL:    cfg.OAuthIssuerURL,
+		ClientID:     cfg.OAuthClientID,
+		ClientSecret: cfg.OAuthClientSecret,
+		RedirectURL:  cfg.OAuthRedirectURL,
+		Scopes:       strings.Fields(cfg.OAuthScopes),
+		CookieName:   cfg.SessionCookieName + "_oauth_state",
+		SigningKey:   cfg.SessionSecret,
+	})
 
 	s := &Server{
 		config:                       cfg,
@@ -55,6 +71,7 @@ func NewServer(cfg config.Config, policyStore store.Store) *Server {
 		policyService:                policyService,
 		relayAuth:                    relayauth.NewEvaluator(policyService),
 		socialService:                socialService,
+		oauthService:                 oauthService,
 		adminLimiter:                 newRateLimiter(defaultAdminRateLimit, defaultAdminRateLimitWindow),
 	}
 
@@ -69,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/api/v1/token", s.handleToken)
+	s.mux.HandleFunc("/api/v1/me/proofs", s.handleSelfProofs)
+	s.mux.HandleFunc("/api/v1/oauth/start", s.handleOAuthStart)
+	s.mux.HandleFunc("/api/v1/oauth/callback", s.handleOAuthCallback)
 	s.mux.HandleFunc("/api/v1/social/bootstrap", s.handleSocialBootstrap)
 	s.mux.HandleFunc("/api/v1/social/beacons", s.handleSocialBeacons)
 	s.mux.HandleFunc("/api/v1/social/notes", s.handleSocialNotes)
@@ -288,6 +308,128 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		"reason":   decision.Reason,
 		"token":    tokenResponse,
 	})
+}
+
+func (s *Server) handleSelfProofs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	authResult, ok := s.requireNIP98(w, r)
+	if !ok {
+		return
+	}
+
+	includeRevoked := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true")
+	proofType := strings.TrimSpace(r.URL.Query().Get("proof_type"))
+	if proofType != "" {
+		validated, err := validateProofType(proofType)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "message": err.Error()})
+			return
+		}
+		proofType = validated
+	}
+
+	records, err := s.listProofsForSubjectAliases(r.Context(), authResult.Pubkey, proofType, includeRevoked, 20)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store_failure", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"entries": records})
+}
+
+func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	if !s.oauthService.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error":   "oauth_not_configured",
+			"message": "OAuth verification is not configured on this relay.",
+		})
+		return
+	}
+
+	authResult, ok := s.requireNIP98(w, r)
+	if !ok {
+		return
+	}
+
+	var request struct {
+		ReturnTo string `json:"return_to"`
+	}
+	if err := decodeJSONBody(r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+
+	authorizationURL, err := s.oauthService.Begin(w, r, authResult.Pubkey, request.ReturnTo)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "oauth_start_failed", "message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authorization_url": authorizationURL,
+		"proof_type":        "oauth",
+		"subject_pubkey":    authResult.Pubkey,
+	})
+}
+
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	returnTo := s.oauthService.PeekReturnTo(r)
+	displayPubkey := ""
+	redirectWithStatus := func(status, message string) {
+		s.oauthService.Clear(w, r)
+		http.Redirect(w, r, appendQueryValues(returnTo, map[string]string{
+			"oauth_status": status,
+			"oauth_error":  message,
+			"key":          displayPubkey,
+		}), http.StatusFound)
+	}
+
+	result, err := s.oauthService.Complete(w, r)
+	if err != nil {
+		redirectWithStatus("error", err.Error())
+		return
+	}
+	displayPubkey = preferredDisplayPubkey(result.Pubkey)
+
+	record, err := s.store.CreateProofVerification(r.Context(), store.ProofVerification{
+		SubjectPubkey:   result.Pubkey,
+		ProofType:       "oauth",
+		ProofValue:      result.ProofValue,
+		GrantedByPubkey: result.Pubkey,
+		Metadata:        result.Metadata,
+	})
+	if err != nil {
+		redirectWithStatus("error", err.Error())
+		return
+	}
+
+	_, auditErr := s.store.CreateAuditEntry(r.Context(), store.AuditEntry{
+		ActorPubkey:  result.Pubkey,
+		Action:       "proof.oauth.verified",
+		TargetPubkey: result.Pubkey,
+		Scope:        "oauth",
+		Metadata:     result.Metadata,
+	})
+	s.logAuditFailure(auditErr)
+
+	http.Redirect(w, r, appendQueryValues(result.ReturnTo, map[string]string{
+		"oauth_status": "success",
+		"oauth_proof":  record.ProofValue,
+		"key":          displayPubkey,
+	}), http.StatusFound)
 }
 
 func (s *Server) handleAdminPolicyCheck(w http.ResponseWriter, r *http.Request) {
@@ -1006,6 +1148,81 @@ func (s *Server) logAuditFailure(err error) {
 	if err != nil {
 		log.Printf("audit log write failed: %v", err)
 	}
+}
+
+func (s *Server) listProofsForSubjectAliases(
+	ctx context.Context,
+	subjectPubkey string,
+	proofType string,
+	includeRevoked bool,
+	limit int,
+) ([]store.ProofVerification, error) {
+	recordsByKey := make(map[string]store.ProofVerification)
+
+	for _, alias := range pubkeys.Aliases(subjectPubkey) {
+		records, err := s.store.ListProofVerifications(ctx, store.ProofVerificationQuery{
+			SubjectPubkey:  alias,
+			ProofType:      proofType,
+			IncludeRevoked: includeRevoked,
+			Limit:          limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			key := fmt.Sprintf("%d:%s:%s:%t", record.ID, record.ProofType, record.ProofValue, record.Revoked)
+			existing, ok := recordsByKey[key]
+			if !ok || record.CreatedAt.After(existing.CreatedAt) {
+				recordsByKey[key] = record
+			}
+		}
+	}
+
+	records := make([]store.ProofVerification, 0, len(recordsByKey))
+	for _, record := range recordsByKey {
+		records = append(records, record)
+	}
+	slices.SortFunc(records, func(left, right store.ProofVerification) int {
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return strings.Compare(right.ProofValue, left.ProofValue)
+		}
+		if left.CreatedAt.After(right.CreatedAt) {
+			return -1
+		}
+		return 1
+	})
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+
+	return records, nil
+}
+
+func appendQueryValues(path string, values map[string]string) string {
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return "/app/settings"
+	}
+
+	query := parsed.Query()
+	for key, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		query.Set(key, trimmed)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func preferredDisplayPubkey(pubkey string) string {
+	for _, alias := range pubkeys.Aliases(pubkey) {
+		if strings.HasPrefix(strings.ToLower(alias), "npub1") {
+			return alias
+		}
+	}
+	return strings.TrimSpace(pubkey)
 }
 
 func parseOptionalLimit(w http.ResponseWriter, r *http.Request) (int, bool) {

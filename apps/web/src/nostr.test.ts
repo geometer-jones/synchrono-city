@@ -6,12 +6,15 @@ import {
   publishBeaconDefinition,
   publishGeoNote,
   publishGeoReaction,
+  queryAuthorKindOneNotes,
   queryBeaconDefinitions,
   queryGeoNotes,
   queryProfileMetadata,
+  queryRecentKindOneNotes,
   signEvent,
   signEventWithPrivateKey
 } from "./nostr";
+import { pulseNetworkGeohash } from "./data";
 
 function createRelayQueryWebSocketMock(
   responsesByAuthorHex: Record<string, Array<{ createdAt: number; content: Record<string, string> }>>
@@ -385,6 +388,199 @@ describe("queryGeoNotes", () => {
           replyTargetId: "note-2",
           rootNoteId: "note-2",
           taggedPubkeys: [author.publicKeyNpub, participant.publicKeyNpub]
+        }
+      ]);
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("queryRecentKindOneNotes", () => {
+  it("queries recent kind 1 relay notes and keeps non-geotagged notes for the wider Pulse feed", async () => {
+    const author = importLocalKeyMaterial(
+      "1212121212121212121212121212121212121212121212121212121212121212"
+    );
+    const participant = importLocalKeyMaterial(
+      "3434343434343434343434343434343434343434343434343434343434343434"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      const notesPromise = queryRecentKindOneNotes("ws://localhost:8080", { limit: 2 });
+      await Promise.resolve();
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const requestPayload = JSON.parse(String(sentPayload)) as [string, string, { kinds?: number[]; limit?: number }];
+      expect(requestPayload).toEqual([
+        "REQ",
+        expect.any(String),
+        {
+          kinds: [1],
+          limit: 2
+        }
+      ]);
+
+      const subscriptionID = requestPayload[1];
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "note-2",
+          pubkey: author.publicKeyHex,
+          created_at: 200,
+          kind: 1,
+          tags: [["g", "9q8yyk"]],
+          content: "Latest plaza note",
+          sig: "sig-2"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "note-1",
+          pubkey: author.publicKeyHex,
+          created_at: 100,
+          kind: 1,
+          tags: [
+            ["g", "9q8yyk"],
+            ["e", "note-2", "", "root", author.publicKeyHex],
+            ["e", "note-2", "", "reply", author.publicKeyHex],
+            ["p", participant.publicKeyHex]
+          ],
+          content: "Earlier plaza note",
+          sig: "sig-1"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "note-no-geohash",
+          pubkey: participant.publicKeyHex,
+          created_at: 300,
+          kind: 1,
+          tags: [],
+          content: "Missing geohash should stay in Pulse",
+          sig: "sig-ignored"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage(["EOSE", subscriptionID]);
+
+      await expect(notesPromise).resolves.toEqual([
+        {
+          id: "note-no-geohash",
+          geohash: pulseNetworkGeohash,
+          authorPubkey: participant.publicKeyNpub,
+          content: "Missing geohash should stay in Pulse",
+          createdAt: "1970-01-01T00:05:00.000Z",
+          replies: 0
+        },
+        {
+          id: "note-2",
+          geohash: "9q8yyk",
+          authorPubkey: author.publicKeyNpub,
+          content: "Latest plaza note",
+          createdAt: "1970-01-01T00:03:20.000Z",
+          replies: 1
+        },
+        {
+          id: "note-1",
+          geohash: "9q8yyk",
+          authorPubkey: author.publicKeyNpub,
+          content: "Earlier plaza note",
+          createdAt: "1970-01-01T00:01:40.000Z",
+          replies: 0,
+          replyTargetId: "note-2",
+          rootNoteId: "note-2",
+          taggedPubkeys: [participant.publicKeyNpub]
+        }
+      ]);
+    } finally {
+      globalThis.WebSocket = originalWebSocket;
+    }
+  });
+});
+
+describe("queryAuthorKindOneNotes", () => {
+  it("queries the latest kind 1 relay notes for a specific author", async () => {
+    const author = importLocalKeyMaterial(
+      "5656565656565656565656565656565656565656565656565656565656565656"
+    );
+    const relaySocketMock = createManualRelayWebSocketMock();
+    const originalWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = relaySocketMock.WebSocket;
+
+    try {
+      const notesPromise = queryAuthorKindOneNotes("ws://localhost:8080", author.publicKeyNpub, { limit: 3 });
+      await Promise.resolve();
+      const sentPayload = relaySocketMock.instances[0]?.sentMessages[0];
+      expect(sentPayload).toBeTruthy();
+
+      const requestPayload = JSON.parse(String(sentPayload)) as [
+        string,
+        string,
+        { kinds?: number[]; authors?: string[]; limit?: number }
+      ];
+      expect(requestPayload).toEqual([
+        "REQ",
+        expect.any(String),
+        {
+          kinds: [1],
+          authors: [author.publicKeyHex],
+          limit: 3
+        }
+      ]);
+
+      const subscriptionID = requestPayload[1];
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "note-2",
+          pubkey: author.publicKeyHex,
+          created_at: 200,
+          kind: 1,
+          tags: [["g", "9q8yyk"]],
+          content: "Newest author note",
+          sig: "sig-2"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage([
+        "EVENT",
+        subscriptionID,
+        {
+          id: "note-1",
+          pubkey: author.publicKeyHex,
+          created_at: 100,
+          kind: 1,
+          tags: [],
+          content: "Older author note",
+          sig: "sig-1"
+        }
+      ]);
+      relaySocketMock.instances[0]?.deliverMessage(["EOSE", subscriptionID]);
+
+      await expect(notesPromise).resolves.toEqual([
+        {
+          id: "note-2",
+          geohash: "9q8yyk",
+          authorPubkey: author.publicKeyNpub,
+          content: "Newest author note",
+          createdAt: "1970-01-01T00:03:20.000Z",
+          replies: 0
+        },
+        {
+          id: "note-1",
+          geohash: pulseNetworkGeohash,
+          authorPubkey: author.publicKeyNpub,
+          content: "Older author note",
+          createdAt: "1970-01-01T00:01:40.000Z",
+          replies: 0
         }
       ]);
     } finally {

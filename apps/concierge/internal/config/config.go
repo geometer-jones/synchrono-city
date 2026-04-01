@@ -22,6 +22,11 @@ type Config struct {
 	SessionTTL         string
 	SessionIdleTTL     string
 	CSRFSigningSecret  string
+	OAuthIssuerURL     string
+	OAuthClientID      string
+	OAuthClientSecret  string
+	OAuthRedirectURL   string
+	OAuthScopes        string
 	DBMaxOpenConns     int
 	DBMaxIdleConns     int
 	DBConnMaxLifetime  time.Duration
@@ -56,6 +61,11 @@ func LoadFromEnv() (Config, error) {
 		SessionTTL:         envOrDefault("SESSION_TTL", "24h"),
 		SessionIdleTTL:     envOrDefault("SESSION_IDLE_TTL", "4h"),
 		CSRFSigningSecret:  os.Getenv("CSRF_SIGNING_SECRET"),
+		OAuthIssuerURL:     os.Getenv("OAUTH_ISSUER_URL"),
+		OAuthClientID:      os.Getenv("OAUTH_CLIENT_ID"),
+		OAuthClientSecret:  os.Getenv("OAUTH_CLIENT_SECRET"),
+		OAuthRedirectURL:   os.Getenv("OAUTH_REDIRECT_URL"),
+		OAuthScopes:        envOrDefault("OAUTH_SCOPES", "openid profile email"),
 		DBMaxOpenConns:     dbMaxOpenConns,
 		DBMaxIdleConns:     dbMaxIdleConns,
 		DBConnMaxLifetime:  dbConnMaxLifetime,
@@ -83,6 +93,25 @@ func LoadFromEnv() (Config, error) {
 
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("missing required env vars: %v", missing)
+	}
+
+	oauthValues := map[string]string{
+		"OAUTH_ISSUER_URL":    cfg.OAuthIssuerURL,
+		"OAUTH_CLIENT_ID":     cfg.OAuthClientID,
+		"OAUTH_CLIENT_SECRET": cfg.OAuthClientSecret,
+		"OAUTH_REDIRECT_URL":  cfg.OAuthRedirectURL,
+	}
+	hasAnyOAuthValue := false
+	missingOAuth := []string{}
+	for name, value := range oauthValues {
+		if value != "" {
+			hasAnyOAuthValue = true
+			continue
+		}
+		missingOAuth = append(missingOAuth, name)
+	}
+	if hasAnyOAuthValue && len(missingOAuth) > 0 {
+		return Config{}, fmt.Errorf("partial oauth config: missing %v", missingOAuth)
 	}
 
 	return cfg, nil

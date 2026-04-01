@@ -16,9 +16,8 @@ import {
   type BeaconThread,
   type BeaconTile
 } from "./beacon-projection";
-import { getActiveLocalKey, loadStoredLocalKeyring } from "./key-manager";
+import { getActiveLocalKey, loadStoredLocalKeyring, setKeyVerification, storeLocalKeyring } from "./key-manager";
 import {
-  buildPulseFeedItems,
   buildRelaySyntheses,
   buildChatThreads,
   buildGeoThreads,
@@ -29,6 +28,7 @@ import {
   buildStoryExport,
   compareDescendingTimestamps,
   type CallMediaStream,
+  type CallParticipantState,
   createDefaultRelayListEntry,
   createFallbackCurrentUser,
   createFallbackParticipantProfile,
@@ -39,16 +39,13 @@ import {
   listNotesForPlace,
   listRecentNotes,
   relayName as defaultRelayName,
-  relayOperatorPubkey as defaultRelayOperatorPubkey,
   relayURL as defaultRelayURL,
   resolveRoomID,
   type CallSession,
   type CrossRelayFeedItem,
-  type FeedSegment,
   type GeoNote,
   type ParticipantProfile,
   type Place,
-  type PulseFeedItem,
   type RelayListEntry,
   type RelaySynthesis
 } from "./data";
@@ -77,6 +74,7 @@ import {
   type CallIntentPayload
 } from "./social-payload";
 import { normalizePublicKeyNpub } from "./nostr-utils";
+import { describeRelayConnectionIssue } from "./relay-url-diagnostics";
 import { showToast } from "./toast";
 
 type CallControl = "mic" | "cam" | "screenshare" | "deafen";
@@ -105,10 +103,10 @@ type AppStateValue = {
   relayName: string;
   relayOperatorPubkey: string;
   relayURL: string;
+  relayBootstrapReady: boolean;
   relayList: RelayListEntry[];
-  feedSegments: FeedSegment[];
+  followedPubkeys: string[];
   crossRelayItems: CrossRelayFeedItem[];
-  pulseFeedItems: PulseFeedItem[];
   relaySyntheses: RelaySynthesis[];
   places: Place[];
   beacons: Beacon[];
@@ -135,7 +133,10 @@ type AppStateValue = {
   sceneHealth: ReturnType<typeof getSceneHealthStats>;
   setLocalCurrentUserPubkey: (pubkey: string | null) => void;
   setProfileMetadata: (pubkey: string, metadata: { name: string; picture: string; about: string }) => void;
+  isPubkeyFollowed: (pubkey: string) => boolean;
+  setPubkeyFollowed: (pubkey: string, followed: boolean) => void;
   addRelayListEntry: (entry: { name: string; url: string }) => RelayListEntry;
+  updateRelayListEntryFlags: (url: string, flags: { inbox: boolean; outbox: boolean }) => RelayListEntry | null;
   removeRelayListEntry: (url: string) => void;
   refreshSocialBootstrap: () => Promise<void>;
   refreshPlaceNotesFromRelay: (geohash: string) => Promise<void>;
@@ -157,6 +158,7 @@ type AppStateValue = {
 
 const AppStateContext = createContext<AppStateValue | null>(null);
 const relayListStorageKey = "synchrono-city.relay-list-overrides.v1";
+const followedPubkeysStorageKey = "synchrono-city.followed-pubkeys.v1";
 
 type RelayListOverrides = {
   added: RelayListEntry[];
@@ -170,12 +172,14 @@ const emptyRelayListOverrides: RelayListOverrides = {
 
 export function AppStateProvider({ children }: PropsWithChildren) {
   const [relayName, setRelayName] = useState(defaultRelayName);
-  const [relayOperatorPubkey, setRelayOperatorPubkey] = useState(defaultRelayOperatorPubkey);
+  const [relayOperatorPubkey, setRelayOperatorPubkey] = useState("");
   const [relayURL, setRelayURL] = useState(defaultRelayURL);
   const [relayBootstrapState, setRelayBootstrapState] = useState<RelayListEntry[]>([
     createDefaultRelayListEntry(defaultRelayName, defaultRelayURL)
   ]);
+  const [relayBootstrapReady, setRelayBootstrapReady] = useState(false);
   const [relayListOverrides, setRelayListOverrides] = useState<RelayListOverrides>(() => loadRelayListOverrides());
+  const [followedPubkeysState, setFollowedPubkeysState] = useState<string[]>(() => loadFollowedPubkeys());
   const [bootstrapCurrentUserPubkey, setBootstrapCurrentUserPubkey] = useState(defaultCurrentUserPubkey);
   const [currentUserPubkeyOverride, setCurrentUserPubkeyOverride] = useState<string | null>(
     () => getActiveLocalKey(loadStoredLocalKeyring())?.publicKeyNpub ?? null
@@ -186,12 +190,12 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   const [profilesState, setProfilesState] = useState<ParticipantProfile[]>([]);
   const [localProfileMetadataState, setLocalProfileMetadataState] = useState<Record<string, LocalProfileMetadata>>({});
   const [notesState, setNotesState] = useState<GeoNote[]>([]);
-  const [feedSegmentsState, setFeedSegmentsState] = useState<FeedSegment[]>([]);
   const [crossRelayItemsState, setCrossRelayItemsState] = useState<CrossRelayFeedItem[]>([]);
   const [placeMediaState, setPlaceMediaState] = useState<PlaceMediaAsset[]>([]);
   const activeCallRequestRef = useRef(0);
   const liveKitSessionRef = useRef<LiveKitSession | null>(null);
   const requestedProfileMetadataPubkeysRef = useRef(new Set<string>());
+  const warnedRelayIssueRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,10 +209,16 @@ export function AppStateProvider({ children }: PropsWithChildren) {
         const normalizedPayload = normalizeBootstrapPayload(payload);
         const nextRelayName = normalizedPayload.relay_name || defaultRelayName;
         const nextRelayURL = normalizedPayload.relay_url || defaultRelayURL;
+        const relayIssue = describeRelayConnectionIssue(nextRelayURL, window.location.href);
+
+        if (relayIssue && warnedRelayIssueRef.current !== relayIssue) {
+          warnedRelayIssueRef.current = relayIssue;
+          showToast(relayIssue, "error");
+        }
 
         startTransition(() => {
           setRelayName(nextRelayName);
-          setRelayOperatorPubkey(normalizedPayload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setRelayOperatorPubkey(normalizedPayload.relay_operator_pubkey ?? "");
           setRelayURL(nextRelayURL);
           setRelayBootstrapState(
             normalizedPayload.relay_list.length > 0
@@ -216,11 +226,11 @@ export function AppStateProvider({ children }: PropsWithChildren) {
               : [createDefaultRelayListEntry(nextRelayName, nextRelayURL)]
           );
           setBootstrapCurrentUserPubkey(normalizedPayload.current_user_pubkey || defaultCurrentUserPubkey);
-          setFeedSegmentsState(normalizedPayload.feed_segments);
           setCrossRelayItemsState(normalizedPayload.cross_relay_items);
           setPlacesState(normalizedPayload.places);
           setProfilesState(normalizedPayload.profiles);
           setNotesState(normalizedPayload.notes);
+          setRelayBootstrapReady(true);
         });
       })
       .catch(() => {
@@ -279,6 +289,14 @@ export function AppStateProvider({ children }: PropsWithChildren) {
   }, [currentUserPubkeyOverride]);
 
   useEffect(() => {
+    storeFollowedPubkeys(followedPubkeysState);
+  }, [followedPubkeysState]);
+
+  useEffect(() => {
+    if (!relayBootstrapReady) {
+      return;
+    }
+
     if (import.meta.env.MODE === "test") {
       return;
     }
@@ -301,9 +319,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     return () => {
       cancelled = true;
     };
-  }, [relayURL]);
+  }, [relayBootstrapReady, relayURL]);
 
   useEffect(() => {
+    if (!relayBootstrapReady) {
+      return;
+    }
+
     const localKeyring = loadStoredLocalKeyring();
 
     if (localKeyring.keys.length === 0) {
@@ -347,9 +369,13 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     return () => {
       cancelled = true;
     };
-  }, [currentUserPubkeyOverride, relayURL]);
+  }, [currentUserPubkeyOverride, relayBootstrapReady, relayURL]);
 
   useEffect(() => {
+    if (!relayBootstrapReady) {
+      return;
+    }
+
     const pendingPubkeys = collectProfileMetadataTargets(notesState, activeCall).filter((pubkey) => {
       if (requestedProfileMetadataPubkeysRef.current.has(pubkey)) {
         return false;
@@ -401,7 +427,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     return () => {
       cancelled = true;
     };
-  }, [activeCall, localProfileMetadataState, notesState, profilesState, relayURL]);
+  }, [activeCall, localProfileMetadataState, notesState, profilesState, relayBootstrapReady, relayURL]);
 
   const effectiveCurrentUserPubkey =
     currentUserPubkeyOverride?.trim() || bootstrapCurrentUserPubkey.trim() || defaultCurrentUserPubkey;
@@ -414,7 +440,6 @@ export function AppStateProvider({ children }: PropsWithChildren) {
     [localProfileMetadataState, profilesState]
   );
   const effectiveNotes = notesState;
-  const effectiveFeedSegments = feedSegmentsState;
   const effectiveCrossRelayItems = crossRelayItemsState;
   const relayListState = useMemo(
     () => mergeRelayListEntries(relayBootstrapState, relayListOverrides, relayName, relayURL),
@@ -440,21 +465,15 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       ),
     [activeCall, effectiveCurrentUserPubkey, effectiveNotes, effectivePlaces, effectiveProfiles, relayOperatorPubkey]
   );
-  const pulseFeedItems = useMemo(
-    () =>
-      buildPulseFeedItems(
-        effectivePlaces,
-        effectiveNotes,
-        effectiveProfiles,
-        effectiveCrossRelayItems,
-        relayName,
-        relayURL
-      ),
-    [effectiveCrossRelayItems, effectiveNotes, effectivePlaces, effectiveProfiles, relayName, relayURL]
-  );
-
   const currentUser =
     profileMap.get(effectiveCurrentUserPubkey) ?? createFallbackCurrentUser(effectiveCurrentUserPubkey);
+  const followedPubkeys = useMemo(
+    () =>
+      normalizeStoredPubkeys(
+        followedPubkeysState.filter((pubkey) => normalizePublicKeyNpub(pubkey).trim() !== effectiveCurrentUserPubkey)
+      ),
+    [effectiveCurrentUserPubkey, followedPubkeysState]
+  );
   const sceneHealth = useMemo(
     () => getSceneHealthStats(effectivePlaces, effectiveNotes),
     [effectivePlaces, effectiveNotes]
@@ -484,7 +503,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           pubkey: participant.identity,
           mic: participant.mic,
           cam: participant.cam,
-          screenshare: participant.screenshare
+          screenshare: participant.screenshare,
+          isSpeaking: participant.isSpeaking
         })),
         mic: localParticipant?.mic ?? current.mic,
         cam: localParticipant?.cam ?? current.cam,
@@ -522,7 +542,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       const participantStates =
         activeCall?.geohash === geohash
           ? new Map(activeCall.participantStates.map((participant) => [participant.pubkey, participant]))
-          : new Map<string, { pubkey: string; mic: boolean; cam: boolean; screenshare: boolean }>();
+          : new Map<string, CallParticipantState>();
 
       return participants.map((pubkey) => {
         const profile = profileMap.get(pubkey) ?? createFallbackParticipantProfile(pubkey);
@@ -575,7 +595,8 @@ export function AppStateProvider({ children }: PropsWithChildren) {
               pubkey,
               mic: profile.mic,
               cam: profile.cam,
-              screenshare: profile.screenshare
+              screenshare: profile.screenshare,
+              isSpeaking: false
             };
           }),
           mediaStreams: overrides?.mediaStreams ?? [],
@@ -788,9 +809,32 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           }
         } catch (error) {
           disconnectLiveKitSession();
+          if (
+            activeLocalKey &&
+            error instanceof ApiError &&
+            error.status === 403 &&
+            typeof error.data === "object" &&
+            error.data !== null &&
+            "reason" in error.data &&
+            (error.data as { reason?: unknown }).reason === "required_proof" &&
+            (error.data as { proof_requirement?: unknown }).proof_requirement === "oauth"
+          ) {
+            const nextKeyring = setKeyVerification(loadStoredLocalKeyring(), activeLocalKey.publicKeyNpub, "oauth", {
+              status: "missing",
+              checkedAt: new Date().toISOString()
+            });
+            storeLocalKeyring(nextKeyring);
+          }
           const message =
             error instanceof MediaAuthError
               ? error.message
+              : error instanceof ApiError &&
+                  error.status === 403 &&
+                  typeof error.data === "object" &&
+                  error.data !== null &&
+                  (error.data as { reason?: unknown }).reason === "required_proof" &&
+                  (error.data as { proof_requirement?: unknown }).proof_requirement === "oauth"
+                ? "Call access requires OAuth verification. Open Settings > Keys to authenticate this pubkey."
               : error instanceof Error
                 ? error.message
                 : "Media temporarily unavailable.";
@@ -811,10 +855,10 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       relayName,
       relayOperatorPubkey,
       relayURL,
+      relayBootstrapReady,
       relayList: relayListState,
-      feedSegments: effectiveFeedSegments,
+      followedPubkeys,
       crossRelayItems: effectiveCrossRelayItems,
-      pulseFeedItems,
       relaySyntheses,
       places: effectivePlaces,
       beacons: beaconProjection.beacons,
@@ -890,16 +934,47 @@ export function AppStateProvider({ children }: PropsWithChildren) {
           }
         }));
       },
+      isPubkeyFollowed: (pubkey) => {
+        const normalizedPubkey = normalizePublicKeyNpub(pubkey).trim();
+        return normalizedPubkey.length > 0 && followedPubkeys.includes(normalizedPubkey);
+      },
+      setPubkeyFollowed: (pubkey, followed) => {
+        const normalizedPubkey = normalizePublicKeyNpub(pubkey).trim();
+        if (!normalizedPubkey || normalizedPubkey === effectiveCurrentUserPubkey) {
+          return;
+        }
+
+        setFollowedPubkeysState((current) => {
+          const nextPubkeys = followed
+            ? [...current, normalizedPubkey]
+            : current.filter((currentPubkey) => currentPubkey !== normalizedPubkey);
+
+          return normalizeStoredPubkeys(nextPubkeys);
+        });
+      },
       addRelayListEntry: ({ name, url }) => {
         const nextEntry = createRelayListEntry(name, url);
         setRelayListOverrides((current) => {
-          const nextOverrides = {
-            added: [...current.added.filter((entry) => entry.url !== nextEntry.url), nextEntry],
-            removed: current.removed.filter((entryURL) => entryURL !== nextEntry.url)
-          };
+          const nextOverrides = upsertRelayListOverride(current, nextEntry);
           storeRelayListOverrides(nextOverrides);
           return nextOverrides;
         });
+        return nextEntry;
+      },
+      updateRelayListEntryFlags: (url, flags) => {
+        const normalizedURL = normalizeRelayListURL(url);
+        const currentEntry = relayListState.find((entry) => entry.url === normalizedURL);
+        if (!currentEntry) {
+          return null;
+        }
+
+        const nextEntry = createRelayListEntry(currentEntry.name, normalizedURL, flags);
+        setRelayListOverrides((current) => {
+          const nextOverrides = upsertRelayListOverride(current, nextEntry);
+          storeRelayListOverrides(nextOverrides);
+          return nextOverrides;
+        });
+
         return nextEntry;
       },
       removeRelayListEntry: (url) => {
@@ -932,7 +1007,7 @@ export function AppStateProvider({ children }: PropsWithChildren) {
 
         startTransition(() => {
           setRelayName(nextRelayName);
-          setRelayOperatorPubkey(payload.relay_operator_pubkey || defaultRelayOperatorPubkey);
+          setRelayOperatorPubkey(payload.relay_operator_pubkey ?? "");
           setRelayURL(nextRelayURL);
           setRelayBootstrapState(
             payload.relay_list.length > 0
@@ -940,7 +1015,6 @@ export function AppStateProvider({ children }: PropsWithChildren) {
               : [createDefaultRelayListEntry(nextRelayName, nextRelayURL)]
           );
           setBootstrapCurrentUserPubkey(payload.current_user_pubkey || defaultCurrentUserPubkey);
-          setFeedSegmentsState(payload.feed_segments);
           setCrossRelayItemsState(payload.cross_relay_items);
           setPlacesState(payload.places);
           setProfilesState(payload.profiles);
@@ -1335,16 +1409,16 @@ export function AppStateProvider({ children }: PropsWithChildren) {
       currentUser,
       currentUserPubkeyOverride,
       effectiveCurrentUserPubkey,
-      effectiveFeedSegments,
       effectiveCrossRelayItems,
       effectiveNotes,
       effectivePlaces,
       effectiveProfiles,
+      followedPubkeys,
       noteMap,
       placeMediaState,
       placeMap,
-      pulseFeedItems,
       profileMap,
+      relayBootstrapReady,
       relayBootstrapState,
       relayListOverrides,
       relayListState,
@@ -1385,7 +1459,8 @@ function updateLocalParticipantControlState(
         pubkey,
         mic: control === "mic" ? value : call.mic,
         cam: control === "cam" ? value : call.cam,
-        screenshare: control === "screenshare" ? value : call.screenshare
+        screenshare: control === "screenshare" ? value : call.screenshare,
+        isSpeaking: false
       }
     ];
   }
@@ -1717,15 +1792,26 @@ function upsertPlace(currentPlaces: Place[], nextPlace: Place) {
   return [mergePlace(currentPlace, nextPlace), ...currentPlaces.filter((place) => place.geohash !== nextPlace.geohash)];
 }
 
-function createRelayListEntry(name: string, url: string): RelayListEntry {
+function createRelayListEntry(
+  name: string,
+  url: string,
+  flags?: Partial<Pick<RelayListEntry, "inbox" | "outbox">>
+): RelayListEntry {
   const normalizedURL = normalizeRelayListURL(url);
   const normalizedName = name.trim();
 
   return {
     url: normalizedURL,
     name: normalizedName || normalizedURL,
-    inbox: true,
-    outbox: true
+    inbox: flags?.inbox ?? true,
+    outbox: flags?.outbox ?? true
+  };
+}
+
+function upsertRelayListOverride(current: RelayListOverrides, nextEntry: RelayListEntry): RelayListOverrides {
+  return {
+    added: [...current.added.filter((entry) => entry.url !== nextEntry.url), nextEntry],
+    removed: current.removed.filter((entryURL) => entryURL !== nextEntry.url)
   };
 }
 
@@ -1842,7 +1928,12 @@ function loadRelayListOverrides(): RelayListOverrides {
           }
 
           try {
-            return [createRelayListEntry(String(entry.name ?? ""), String(entry.url ?? ""))];
+            return [
+              createRelayListEntry(String(entry.name ?? ""), String(entry.url ?? ""), {
+                inbox: entry.inbox === false ? false : true,
+                outbox: entry.outbox === false ? false : true
+              })
+            ];
           } catch {
             return [];
           }
@@ -1875,6 +1966,48 @@ function storeRelayListOverrides(overrides: RelayListOverrides) {
   }
 
   storage.setItem(relayListStorageKey, JSON.stringify(overrides));
+}
+
+function normalizeStoredPubkeys(pubkeys: string[]) {
+  return Array.from(
+    new Set(
+      pubkeys
+        .map((pubkey) => normalizePublicKeyNpub(pubkey).trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function loadFollowedPubkeys(): string[] {
+  const storage = resolveStorage();
+  if (!storage) {
+    return [];
+  }
+
+  const rawValue = storage.getItem(followedPubkeysStorageKey);
+  if (!rawValue) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return normalizeStoredPubkeys(parsed.filter((entry): entry is string => typeof entry === "string"));
+  } catch {
+    return [];
+  }
+}
+
+function storeFollowedPubkeys(pubkeys: string[]) {
+  const storage = resolveStorage();
+  if (!storage) {
+    return;
+  }
+
+  storage.setItem(followedPubkeysStorageKey, JSON.stringify(normalizeStoredPubkeys(pubkeys)));
 }
 
 function resolveStorage(): Pick<Storage, "getItem" | "setItem"> | null {

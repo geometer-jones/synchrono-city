@@ -27,6 +27,26 @@ const fallbackRelayName = "Synchrono City Local"
 const fallbackRelayURL = "ws://localhost:8080"
 const cohortTag = "cohort"
 
+var defaultBootstrapRelays = []RelayListEntry{
+	{Name: "Damus", URL: "wss://relay.damus.io", Inbox: true, Outbox: true},
+	{Name: "nos.lol", URL: "wss://nos.lol", Inbox: true, Outbox: true},
+	{Name: "Snort", URL: "wss://relay.snort.social", Inbox: true, Outbox: true},
+	{Name: "Blastr", URL: "wss://nostr.mutinywallet.com", Inbox: true, Outbox: true},
+	{Name: "Nostr Band", URL: "wss://relay.nostr.band", Inbox: true, Outbox: true},
+	{Name: "Nostr Pub", URL: "wss://relay.nostr.pub", Inbox: true, Outbox: true},
+	{Name: "Bitcoiner Social", URL: "wss://relay.bitcoiner.social", Inbox: true, Outbox: true},
+	{Name: "Nostr Wine", URL: "wss://nostr.wine", Inbox: true, Outbox: true},
+	{Name: "Nostr Mom", URL: "wss://nostr.mom", Inbox: true, Outbox: true},
+	{Name: "Nostr Net", URL: "wss://relay.nostr.net", Inbox: true, Outbox: true},
+	{Name: "Nostr Info", URL: "wss://relay.nostr.info", Inbox: true, Outbox: true},
+	{Name: "Nostrich", URL: "wss://relay.nostrich.de", Inbox: true, Outbox: true},
+	{Name: "Current", URL: "wss://relay.current.fyi", Inbox: true, Outbox: true},
+	{Name: "Nostr Rocks", URL: "wss://nostr.rocks", Inbox: true, Outbox: true},
+	{Name: "Wellorder", URL: "wss://relay.wellorder.net", Inbox: true, Outbox: true},
+	{Name: "Primal Cache", URL: "wss://cache1.primal.net", Inbox: true, Outbox: false},
+	{Name: "Nostr1 Filter", URL: "wss://filter.nostr1.com", Inbox: true, Outbox: false},
+}
+
 type Profile struct {
 	Pubkey      string `json:"pubkey"`
 	DisplayName string `json:"display_name"`
@@ -65,11 +85,6 @@ type Note struct {
 	Replies      int    `json:"replies"`
 }
 
-type FeedSegment struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
 type RelayListEntry struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
@@ -78,17 +93,21 @@ type RelayListEntry struct {
 }
 
 type CrossRelayFeedItem struct {
-	ID           string `json:"id"`
-	RelayName    string `json:"relay_name"`
-	RelayURL     string `json:"relay_url"`
-	AuthorPubkey string `json:"author_pubkey"`
-	AuthorName   string `json:"author_name"`
-	Geohash      string `json:"geohash"`
-	PlaceTitle   string `json:"place_title"`
-	Content      string `json:"content"`
-	PublishedAt  string `json:"published_at"`
-	SourceLabel  string `json:"source_label"`
-	WhyVisible   string `json:"why_visible"`
+	ID               string `json:"id"`
+	RelayName        string `json:"relay_name"`
+	RelayURL         string `json:"relay_url"`
+	AuthorPubkey     string `json:"author_pubkey"`
+	AuthorName       string `json:"author_name"`
+	Geohash          string `json:"geohash"`
+	PlaceTitle       string `json:"place_title"`
+	Content          string `json:"content"`
+	PublishedAt      string `json:"published_at"`
+	SourceLabel      string `json:"source_label"`
+	WhyVisible       string `json:"why_visible"`
+	ZapCount         int    `json:"zap_count,omitempty"`
+	EngagementScore  int    `json:"engagement_score,omitempty"`
+	FollowGraphScore int    `json:"follow_graph_score,omitempty"`
+	FollowerCount    int    `json:"follower_count,omitempty"`
 }
 
 type BootstrapResponse struct {
@@ -100,7 +119,6 @@ type BootstrapResponse struct {
 	Places              []Place              `json:"places"`
 	Profiles            []Profile            `json:"profiles"`
 	Notes               []Note               `json:"notes"`
-	FeedSegments        []FeedSegment        `json:"feed_segments"`
 	CrossRelayItems     []CrossRelayFeedItem `json:"cross_relay_items"`
 }
 
@@ -126,7 +144,6 @@ type Service struct {
 	places            []Place
 	profiles          []Profile
 	notes             []Note
-	feedSegments      []FeedSegment
 	crossRelayItems   []CrossRelayFeedItem
 	nextNoteID        int64
 	now               func() time.Time
@@ -152,14 +169,9 @@ func NewService(operatorPubkey, relayName, relayURL string, socialStore store.St
 		places:            []Place{},
 		profiles:          []Profile{},
 		notes:             []Note{},
-		feedSegments: []FeedSegment{
-			{Name: "Following", Description: "Explainable projection of followed authors."},
-			{Name: "Local", Description: "Public events carried by the active relay."},
-			{Name: "For You", Description: "Concierge-produced merge across relays and follows."},
-		},
-		crossRelayItems: []CrossRelayFeedItem{},
-		nextNoteID:      0,
-		now:             time.Now,
+		crossRelayItems:   []CrossRelayFeedItem{},
+		nextNoteID:        0,
+		now:               time.Now,
 	}
 }
 
@@ -179,18 +191,53 @@ func (s *Service) Bootstrap() BootstrapResponse {
 		RelayOperatorPubkey: s.operatorPubkey,
 		CurrentUserPubkey:   s.currentUserPubkey,
 		RelayURL:            s.relayURL,
-		RelayList: []RelayListEntry{{
-			Name:   s.relayName,
-			URL:    s.relayURL,
-			Inbox:  true,
-			Outbox: true,
-		}},
-		Places:          places,
-		Profiles:        slices.Clone(s.profiles),
-		Notes:           slices.Clone(s.notes),
-		FeedSegments:    slices.Clone(s.feedSegments),
-		CrossRelayItems: slices.Clone(s.crossRelayItems),
+		RelayList:           buildBootstrapRelayList(s.relayName, s.relayURL),
+		Places:              places,
+		Profiles:            slices.Clone(s.profiles),
+		Notes:               slices.Clone(s.notes),
+		CrossRelayItems:     slices.Clone(s.crossRelayItems),
 	}
+}
+
+func buildBootstrapRelayList(primaryRelayName, primaryRelayURL string) []RelayListEntry {
+	entries := make([]RelayListEntry, 0, 1+len(defaultBootstrapRelays))
+	seen := make(map[string]struct{}, 1+len(defaultBootstrapRelays))
+
+	addEntry := func(entry RelayListEntry) {
+		url := strings.TrimSpace(entry.URL)
+		if url == "" {
+			return
+		}
+		if _, exists := seen[url]; exists {
+			return
+		}
+
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = url
+		}
+
+		seen[url] = struct{}{}
+		entries = append(entries, RelayListEntry{
+			Name:   name,
+			URL:    url,
+			Inbox:  entry.Inbox,
+			Outbox: entry.Outbox,
+		})
+	}
+
+	addEntry(RelayListEntry{
+		Name:   primaryRelayName,
+		URL:    primaryRelayURL,
+		Inbox:  true,
+		Outbox: true,
+	})
+
+	for _, entry := range defaultBootstrapRelays {
+		addEntry(entry)
+	}
+
+	return entries
 }
 
 func (s *Service) CreateNote(geohash, authorPubkey, content string) (Note, error) {

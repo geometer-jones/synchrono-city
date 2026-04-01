@@ -1,7 +1,12 @@
+import { normalizePublicKeyNpub } from "./nostr-utils";
+
 export const relayOperatorPubkey = "npub1operator";
 export const relayName = "Synchrono City Local";
 export const relayURL = "ws://localhost:8080";
 export const currentUserPubkey = "npub1scout";
+export const pulseNetworkGeohash = "pulse-network";
+export const pulseNetworkPlaceTitle = "Wider network";
+export const pulseFeedPageSize = 30;
 
 export type ParticipantProfile = {
   pubkey: string;
@@ -75,11 +80,6 @@ export type GeoNoteReaction = {
   count: number;
 };
 
-export type FeedSegment = {
-  name: string;
-  description: string;
-};
-
 export type RelayListEntry = {
   url: string;
   name: string;
@@ -99,12 +99,15 @@ export type CrossRelayFeedItem = {
   publishedAt: string;
   sourceLabel: string;
   whyVisible: string;
+  zapCount?: number;
+  engagementScore?: number;
+  followGraphScore?: number;
+  followerCount?: number;
 };
 
 export type PulseFeedItem = {
   id: string;
-  lane: "Following" | "Local" | "For You";
-  kind: "local_note" | "cross_relay";
+  lane: "Following" | "For You";
   relayName: string;
   relayUrl: string;
   authorPubkey: string;
@@ -115,8 +118,12 @@ export type PulseFeedItem = {
   publishedAt: string;
   sourceLabel: string;
   whyVisible: string;
-  local: boolean;
-  noteId?: string;
+  postCount: number;
+  posts: {
+    id: string;
+    content: string;
+    publishedAt: string;
+  }[];
 };
 
 export type RelaySynthesis = {
@@ -149,18 +156,21 @@ export type CallMediaStream = {
   };
 };
 
+export type CallParticipantState = {
+  pubkey: string;
+  mic: boolean;
+  cam: boolean;
+  screenshare: boolean;
+  isSpeaking: boolean;
+};
+
 export type CallSession = {
   geohash: string;
   roomID: string;
   placeTitle: string;
   startedAt?: string;
   participantPubkeys: string[];
-  participantStates: Array<{
-    pubkey: string;
-    mic: boolean;
-    cam: boolean;
-    screenshare: boolean;
-  }>;
+  participantStates: CallParticipantState[];
   mediaStreams: CallMediaStream[];
   transport: "local" | "livekit";
   connectionState: "local_preview" | "connecting" | "connected" | "failed";
@@ -176,6 +186,10 @@ export type CallSession = {
   deafen: boolean;
   minimized: boolean;
 };
+
+export function isConnectedLiveKitCall(activeCall: CallSession | null | undefined): activeCall is CallSession {
+  return activeCall?.transport === "livekit" && activeCall.connectionState === "connected";
+}
 
 export function createFallbackCurrentUser(pubkey = currentUserPubkey): ParticipantProfile {
   return {
@@ -381,15 +395,16 @@ export function getPlaceParticipantPubkeys(
   activeCall: CallSession | null,
   currentPubkey: string
 ) {
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const participants = [...place.occupantPubkeys];
-  if (activeCall?.geohash === place.geohash) {
-    for (const pubkey of activeCall.participantPubkeys) {
+  if (connectedActiveCall?.geohash === place.geohash) {
+    for (const pubkey of connectedActiveCall.participantPubkeys) {
       if (!participants.includes(pubkey)) {
         participants.push(pubkey);
       }
     }
   }
-  if (activeCall?.geohash === place.geohash && !participants.includes(currentPubkey)) {
+  if (connectedActiveCall?.geohash === place.geohash && !participants.includes(currentPubkey)) {
     participants.push(currentPubkey);
   }
   return participants;
@@ -402,9 +417,10 @@ export function buildGeoThreads(
   currentPubkey: string,
   operatorPubkey = relayOperatorPubkey
 ) {
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const effectivePlaces =
-    activeCall && !places.some((place) => place.geohash === activeCall.geohash)
-      ? [createEphemeralPlace(activeCall.geohash), ...places]
+    connectedActiveCall && !places.some((place) => place.geohash === connectedActiveCall.geohash)
+      ? [createEphemeralPlace(connectedActiveCall.geohash), ...places]
       : places;
 
   // Pre-group notes by geohash to avoid O(n*m) filtering per place
@@ -423,9 +439,9 @@ export function buildGeoThreads(
       title: place.title,
       summary: place.activitySummary,
       noteCount: sortedPlaceNotes.length,
-      participants: getPlaceParticipantPubkeys(place, activeCall, currentPubkey),
+      participants: getPlaceParticipantPubkeys(place, connectedActiveCall, currentPubkey),
       unread: place.unread,
-      activeCall: activeCall?.geohash === place.geohash || place.occupantPubkeys.length > 0,
+      activeCall: connectedActiveCall?.geohash === place.geohash || place.occupantPubkeys.length > 0,
       pinnedNoteId: place.pinnedNoteId,
       roomID: resolveRoomID(place.geohash, operatorPubkey)
     };
@@ -443,9 +459,10 @@ export function buildPlaceTiles(
   currentPubkey: string,
   operatorPubkey = relayOperatorPubkey
 ) {
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const effectivePlaces =
-    activeCall && !places.some((place) => place.geohash === activeCall.geohash)
-      ? [createEphemeralPlace(activeCall.geohash), ...places]
+    connectedActiveCall && !places.some((place) => place.geohash === connectedActiveCall.geohash)
+      ? [createEphemeralPlace(connectedActiveCall.geohash), ...places]
       : places;
 
   // Pre-group notes by geohash to avoid O(n*m) filtering per place
@@ -464,7 +481,7 @@ export function buildPlaceTiles(
       title: place.title,
       latestNote: sortedPlaceNotes[0]?.content ?? "Room is occupied without a note.",
       noteCount: sortedPlaceNotes.length,
-      participants: getPlaceParticipantPubkeys(place, activeCall, currentPubkey),
+      participants: getPlaceParticipantPubkeys(place, connectedActiveCall, currentPubkey),
       roomID: resolveRoomID(place.geohash, operatorPubkey)
     };
   });
@@ -501,55 +518,209 @@ export function listNotesByAuthor(notes: GeoNote[], pubkey: string) {
   return sortNotesByRecency(notes.filter((note) => note.authorPubkey === pubkey));
 }
 
-export function buildPulseFeedItems(
-  places: Place[],
+export function buildCrossRelayFeedItemsFromNotes(
+  relay: Pick<RelayListEntry, "name" | "url">,
   notes: GeoNote[],
+  places: Place[],
   profiles: ParticipantProfile[],
-  remoteItems: CrossRelayFeedItem[],
-  localRelayName = relayName,
-  localRelayUrl = relayURL
+  options?: Partial<Pick<CrossRelayFeedItem, "sourceLabel" | "whyVisible">>
 ) {
+  const relayLabel = relay.name.trim() || relay.url.trim();
+  const relayUrl = relay.url.trim();
   const placesByGeohash = buildPlaceMap(places);
   const profilesByPubkey = buildParticipantMap(profiles);
 
-  const localItems: PulseFeedItem[] = listPulseLocalNotes(places, notes).map((note) => ({
-    id: `pulse-local-${note.id}`,
-    lane: "Local",
-    kind: "local_note",
-    relayName: localRelayName,
-    relayUrl: localRelayUrl,
+  return sortNotesByRecency(notes).map((note) => ({
+    id: note.id,
+    relayName: relayLabel,
+    relayUrl,
     authorPubkey: note.authorPubkey,
     authorName: profilesByPubkey.get(note.authorPubkey)?.displayName ?? note.authorPubkey,
     geohash: note.geohash,
-    placeTitle: placesByGeohash.get(note.geohash)?.title ?? note.geohash,
+    placeTitle:
+      note.geohash === pulseNetworkGeohash
+        ? pulseNetworkPlaceTitle
+        : placesByGeohash.get(note.geohash)?.title ?? note.geohash,
     content: note.content,
     publishedAt: note.createdAt,
-    sourceLabel: "Local relay",
-    whyVisible: "Published on the active relay and merged with followed and discovered relay context.",
-    local: true,
-    noteId: note.id
+    sourceLabel: options?.sourceLabel ?? "Relay list",
+    whyVisible: options?.whyVisible ?? "Fetched live from a configured relay."
   }));
+}
 
-  const crossRelayFeed: PulseFeedItem[] = remoteItems.map((item) => ({
-    id: `pulse-remote-${item.id}`,
-    lane: item.sourceLabel === "Direct follow" ? "Following" : "For You",
-    kind: "cross_relay",
-    relayName: item.relayName,
-    relayUrl: item.relayUrl,
-    authorPubkey: item.authorPubkey,
-    authorName: item.authorName,
-    geohash: item.geohash,
-    placeTitle: item.placeTitle,
-    content: item.content,
-    publishedAt: item.publishedAt,
-    sourceLabel: item.sourceLabel,
-    whyVisible: item.whyVisible,
-    local: false
-  }));
+export function mergeCrossRelayFeedItems(...collections: CrossRelayFeedItem[][]) {
+  const merged: CrossRelayFeedItem[] = [];
+  const seenIDs = new Set<string>();
+  const seenFallbackKeys = new Set<string>();
 
-  return [...localItems, ...crossRelayFeed].sort((left, right) =>
-    compareDescendingTimestamps(left.publishedAt, right.publishedAt)
+  for (const collection of collections) {
+    for (const item of collection) {
+      const normalizedID = item.id.trim();
+      const fallbackKey = [
+        item.relayUrl,
+        item.authorPubkey,
+        item.geohash,
+        item.publishedAt,
+        item.content
+      ].join("\u0000");
+
+      if (normalizedID && seenIDs.has(normalizedID)) {
+        continue;
+      }
+      if (seenFallbackKeys.has(fallbackKey)) {
+        continue;
+      }
+
+      if (normalizedID) {
+        seenIDs.add(normalizedID);
+      }
+      seenFallbackKeys.add(fallbackKey);
+      merged.push(item);
+    }
+  }
+
+  return merged.sort((left, right) => compareDescendingTimestamps(left.publishedAt, right.publishedAt));
+}
+
+export function buildPulseFeedItems(
+  remoteItems: CrossRelayFeedItem[],
+  followedPubkeys: string[] = []
+) {
+  const followedPubkeySet = new Set(
+    followedPubkeys
+      .map((pubkey) => normalizePublicKeyNpub(pubkey).trim())
+      .filter(Boolean)
   );
+  const laneTaggedItems = remoteItems
+    .map((item) => ({
+      ...item,
+      lane:
+        item.sourceLabel === "Direct follow" ||
+        followedPubkeySet.has(normalizePublicKeyNpub(item.authorPubkey).trim())
+          ? ("Following" as const)
+          : ("For You" as const)
+    }))
+    .sort((left, right) => compareDescendingTimestamps(left.publishedAt, right.publishedAt));
+  const aggregatedGroups = buildPulseFeedGroups(laneTaggedItems);
+  return rankPulseFeedGroups(aggregatedGroups).map((group) => buildPulseFeedItem(group));
+}
+
+const pulseAggregationWindowMs = 45 * 60 * 1000;
+
+function buildPulseFeedGroups(items: Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>) {
+  const groups: Array<Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>> = [];
+  let currentGroup: Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }> = [];
+
+  for (const item of items) {
+    if (currentGroup.length === 0 || shouldAggregatePulseFeedItem(currentGroup[0], item)) {
+      currentGroup.push(item);
+      continue;
+    }
+
+    groups.push(currentGroup);
+    currentGroup = [item];
+  }
+
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  return groups;
+}
+
+function shouldAggregatePulseFeedItem(
+  anchor: CrossRelayFeedItem & { lane: PulseFeedItem["lane"] },
+  candidate: CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }
+) {
+  if (
+    anchor.lane !== candidate.lane ||
+    anchor.relayUrl !== candidate.relayUrl ||
+    anchor.authorPubkey !== candidate.authorPubkey ||
+    anchor.geohash !== candidate.geohash
+  ) {
+    return false;
+  }
+
+  const anchorTimestamp = parseTimestamp(anchor.publishedAt);
+  const candidateTimestamp = parseTimestamp(candidate.publishedAt);
+  if (anchorTimestamp == null || candidateTimestamp == null) {
+    return false;
+  }
+
+  return Math.abs(anchorTimestamp - candidateTimestamp) <= pulseAggregationWindowMs;
+}
+
+function rankPulseFeedGroups(
+  groups: Array<Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>>
+) {
+  const rankedGroups: Array<Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>> = [];
+  const lanes: PulseFeedItem["lane"][] = ["For You", "Following"];
+
+  for (const lane of lanes) {
+    const laneGroups = groups.filter((group) => group[0]?.lane === lane);
+
+    for (let index = 0; index < laneGroups.length; index += pulseFeedPageSize) {
+      const batch = laneGroups.slice(index, index + pulseFeedPageSize);
+      batch.sort(comparePulseFeedGroupRanking);
+      rankedGroups.push(...batch);
+    }
+  }
+
+  return rankedGroups;
+}
+
+function comparePulseFeedGroupRanking(
+  left: Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>,
+  right: Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>
+) {
+  const scoreDifference = computePulseFeedGroupScore(right) - computePulseFeedGroupScore(left);
+  if (scoreDifference !== 0) {
+    return scoreDifference;
+  }
+
+  const publishedAtComparison = compareDescendingTimestamps(left[0]?.publishedAt, right[0]?.publishedAt);
+  if (publishedAtComparison !== 0) {
+    return publishedAtComparison;
+  }
+
+  return (left[0]?.id ?? "").localeCompare(right[0]?.id ?? "");
+}
+
+function computePulseFeedGroupScore(group: Array<CrossRelayFeedItem & { lane: PulseFeedItem["lane"] }>) {
+  return group.reduce(
+    (total, item) =>
+      total +
+      (item.zapCount ?? 0) +
+      (item.engagementScore ?? 0) +
+      (item.followGraphScore ?? 0) +
+      (item.followerCount ?? 0),
+    0
+  );
+}
+
+function buildPulseFeedItem(group: (CrossRelayFeedItem & { lane: PulseFeedItem["lane"] })[]): PulseFeedItem {
+  const latestItem = group[0];
+
+  return {
+    id: `pulse-remote-${latestItem.id}`,
+    lane: latestItem.lane,
+    relayName: latestItem.relayName,
+    relayUrl: latestItem.relayUrl,
+    authorPubkey: latestItem.authorPubkey,
+    authorName: latestItem.authorName,
+    geohash: latestItem.geohash,
+    placeTitle: latestItem.placeTitle,
+    content: latestItem.content,
+    publishedAt: latestItem.publishedAt,
+    sourceLabel: latestItem.sourceLabel,
+    whyVisible: latestItem.whyVisible,
+    postCount: group.length,
+    posts: group.map((item) => ({
+      id: item.id,
+      content: item.content,
+      publishedAt: item.publishedAt
+    }))
+  };
 }
 
 export function buildStoryExport(

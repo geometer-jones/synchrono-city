@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { type CallMediaStream, type ParticipantProfile } from "../data";
+import { isConnectedLiveKitCall, type CallMediaStream, type ParticipantProfile } from "../data";
 import { useAppState } from "../app-state";
 import { buildBeaconMapSearch, createBeaconMapFocusKey } from "../beacon-map-focus";
 
@@ -36,6 +36,7 @@ type CallDisplayTile = {
   pubkey: string;
   source: "camera" | "screen_share";
   isLocal: boolean;
+  isSpeaking: boolean;
   stream?: CallMediaStream;
   participantLabel: string;
   participantPicture?: string;
@@ -47,7 +48,7 @@ export function ActiveCallControls({
 }: ActiveCallControlsProps) {
   const { activeCall, leaveBeaconCall, toggleCallControl } = useAppState();
 
-  if (!activeCall) {
+  if (!isConnectedLiveKitCall(activeCall)) {
     return null;
   }
 
@@ -80,7 +81,7 @@ export function CallOverlay() {
   const { activeCall, getBeacon } = useAppState();
   const navigate = useNavigate();
 
-  if (!activeCall) {
+  if (!isConnectedLiveKitCall(activeCall)) {
     return null;
   }
 
@@ -102,8 +103,6 @@ export function CallOverlay() {
           <ActiveCallControls className="call-controls call-controls-inline" />
         </div>
       </div>
-
-      <ActiveCallMediaStreams includeParticipantTiles={false} />
     </aside>
   );
 }
@@ -116,7 +115,7 @@ export function ActiveCallMediaStreams({
 }: ActiveCallMediaStreamsProps) {
   const { activeCall, currentUser, getProfile } = useAppState();
 
-  if (!activeCall) {
+  if (!isConnectedLiveKitCall(activeCall)) {
     return null;
   }
 
@@ -201,9 +200,7 @@ function CallStreamTile({ tile }: CallStreamTileProps) {
 
   return (
     <article
-      className={
-        tile.source === "screen_share" ? "call-stream-card is-screen-share" : "call-stream-card is-camera"
-      }
+      className={resolveTileClassName(tile)}
       aria-label={`${tile.participantLabel} ${tile.source === "screen_share" ? "screen share" : "camera"} stream`}
     >
       <div className="call-stream-card-header">
@@ -249,6 +246,7 @@ function buildCallDisplayTiles(
   const includeLocal = options?.includeLocal ?? false;
   const includeParticipantTiles = options?.includeParticipantTiles ?? true;
   const cameraStreamsByPubkey = new Map<string, CallMediaStream>();
+  const participantStatesByPubkey = new Map(activeCall.participantStates.map((participant) => [participant.pubkey, participant]));
   const screenShareStreams: CallMediaStream[] = [];
 
   for (const stream of activeCall.mediaStreams) {
@@ -279,6 +277,7 @@ function buildCallDisplayTiles(
             pubkey,
             source: "camera",
             isLocal,
+            isSpeaking: participantStatesByPubkey.get(pubkey)?.isSpeaking ?? false,
             stream,
             participantLabel: resolveParticipantLabel(profile, pubkey),
             participantPicture: profile?.picture
@@ -297,6 +296,7 @@ function buildCallDisplayTiles(
         pubkey: stream.pubkey,
         source: "screen_share",
         isLocal,
+        isSpeaking: false,
         stream,
         participantLabel: resolveParticipantLabel(profile, stream.pubkey),
         participantPicture: profile?.picture
@@ -304,6 +304,16 @@ function buildCallDisplayTiles(
     });
 
   return [...participantTiles, ...screenTiles];
+}
+
+function resolveTileClassName(tile: CallDisplayTile) {
+  const classes = ["call-stream-card", tile.source === "screen_share" ? "is-screen-share" : "is-camera"];
+
+  if (tile.source === "camera" && tile.isSpeaking) {
+    classes.push("is-speaking");
+  }
+
+  return classes.join(" ");
 }
 
 function ToggleControlButton({ active, disabled = false, icon, label, onClick }: ToggleControlButtonProps) {

@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
 import { createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CohortBeaconMetadata } from "../beacon-metadata";
 import type { CallSession, ParticipantProfile } from "../data";
+import "../styles.css";
 import { WorldRoute } from "./world-route";
 
 const joinBeaconCall = vi.fn();
@@ -16,6 +17,20 @@ const reactToPlaceNote = vi.fn();
 const refreshPlaceNotesFromRelay = vi.fn();
 const uploadBeaconPicture = vi.fn();
 const grantRoomPermission = vi.fn();
+
+function findStyleRule(selectorText: string) {
+  for (const styleSheet of Array.from(document.styleSheets)) {
+    const cssRules = Array.from(styleSheet.cssRules);
+
+    for (const rule of cssRules) {
+      if (rule instanceof CSSStyleRule && rule.selectorText === selectorText) {
+        return rule;
+      }
+    }
+  }
+
+  return null;
+}
 
 type MockBeaconTile = {
   geohash: string;
@@ -36,6 +51,8 @@ type MockBeaconThread = {
   about: string;
   noteCount: number;
   participants: string[];
+  ownerPubkey?: string;
+  memberPubkeys?: string[];
   unread: boolean;
   activeCall: boolean;
   pinnedNoteId?: string;
@@ -107,6 +124,8 @@ let beaconThreads: MockBeaconThread[] = [
     about: "Low-pressure founder conversations in the valley.",
     noteCount: 1,
     participants: ["npub1scout"],
+    ownerPubkey: "npub1scout",
+    memberPubkeys: ["npub1scout", "npub1operator"],
     unread: false,
     activeCall: true,
     pinnedNoteId: "note-1",
@@ -132,7 +151,7 @@ function createActiveCall(overrides: Partial<CallSession> = {}): CallSession {
     placeTitle: "SFV Founders",
     startedAt: "2026-03-22T20:00:00.000Z",
     participantPubkeys: ["npub1scout"],
-    participantStates: [{ pubkey: "npub1scout", mic: true, cam: false, screenshare: false }],
+    participantStates: [{ pubkey: "npub1scout", mic: true, cam: false, screenshare: false, isSpeaking: false }],
     mediaStreams: [],
     transport: "livekit",
     connectionState: "connected",
@@ -230,6 +249,16 @@ function LocationProbe() {
   return <div data-testid="route-location">{`${location.pathname}${location.search}`}</div>;
 }
 
+function NavigateToWorldButton() {
+  const navigate = useNavigate();
+
+  return (
+    <button type="button" onClick={() => navigate("/app")}>
+      World tab
+    </button>
+  );
+}
+
 vi.mock("../components/map-preview", () => ({
   MapPreview: (props: Parameters<typeof mockMapPreview>[0]) => mockMapPreview(props)
 }));
@@ -315,6 +344,8 @@ describe("WorldRoute", () => {
         about: "Low-pressure founder conversations in the valley.",
         noteCount: 1,
         participants: ["npub1scout"],
+        ownerPubkey: "npub1scout",
+        memberPubkeys: ["npub1scout", "npub1operator"],
         unread: false,
         activeCall: true,
         pinnedNoteId: "note-1",
@@ -373,7 +404,7 @@ describe("WorldRoute", () => {
     expect(screen.getByRole("separator", { name: "Resize world panels" })).toBeInTheDocument();
     expect(screen.getByTestId("selected-geohash")).toHaveTextContent("");
     expect(screen.getByTestId("pending-geohash")).toHaveTextContent("9q8yyk34");
-    expect(screen.getByRole("button", { name: /light beacon/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^light beacon$/i })).toBeInTheDocument();
     expect(
       screen.getByText(
         "A beacon anchors an online community to a geolocation. As a beacon admin, you will be able to delete posts, kick users, and appoint mods within your beacon."
@@ -381,6 +412,34 @@ describe("WorldRoute", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/chosen place/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/no beacon is lit here yet\./i)).not.toBeInTheDocument();
+  });
+
+  it("hides the beacon explainer once the Light Beacon form is open", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="/app" element={<WorldRoute />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /background select/i }));
+    expect(
+      screen.getByText(
+        "A beacon anchors an online community to a geolocation. As a beacon admin, you will be able to delete posts, kick users, and appoint mods within your beacon."
+      )
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^light beacon$/i }));
+
+    expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "A beacon anchors an online community to a geolocation. As a beacon admin, you will be able to delete posts, kick users, and appoint mods within your beacon."
+      )
+    ).not.toBeInTheDocument();
   });
 
   it("removes the pending beacon marker when it is clicked", () => {
@@ -400,10 +459,12 @@ describe("WorldRoute", () => {
 
     expect(screen.getByTestId("pending-geohash")).toHaveTextContent("");
     expect(screen.queryByRole("button", { name: /light beacon/i })).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/synchrono city manifesto/i)).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: "Resize world panels" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/synchrono city manifesto/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/world overview/i)).toBeInTheDocument();
   });
 
-  it("renders the manifesto in the right panel when no beacon is selected", () => {
+  it("shows the world overview in the right panel when no beacon is selected", () => {
     render(
       <MemoryRouter initialEntries={["/app"]}>
         <Routes>
@@ -412,9 +473,66 @@ describe("WorldRoute", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByLabelText(/synchrono city manifesto/i)).toBeInTheDocument();
-    expect(screen.getByText(/amid exploding sovereign debt/i)).toBeInTheDocument();
-    expect(screen.getByText("1. Human connection is the scarce good")).toBeInTheDocument();
+    expect(screen.getByRole("separator", { name: "Resize world panels" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/synchrono city manifesto/i)).not.toBeInTheDocument();
+    const overview = screen.getByLabelText(/world overview/i);
+    expect(overview).toBeInTheDocument();
+    expect(overview.querySelector(".world-manifesto-card")).not.toBeNull();
+    expect(screen.getByText("1 live")).toBeInTheDocument();
+    expect(screen.getByText("1 beacons")).toBeInTheDocument();
+    expect(screen.getByText("1 notes")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "https://synchrono.city" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Nostr" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "LiveKit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Blossom" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Concierge" })).toBeInTheDocument();
+    expect(screen.getByText(/establishes a standard for bundling these open source protocols together/i)).toBeInTheDocument();
+    expect(screen.getByText(/the client serves as a relay manager as well/i)).toBeInTheDocument();
+    expect(screen.getByText(/avoid online serfdom, hold your own keys, host your own relay/i)).toBeInTheDocument();
+    expect(screen.getByText(/to host your own, just run/i)).toBeInTheDocument();
+    expect(screen.getByText(/git clone/)).toBeInTheDocument();
+    expect(screen.getByText(/\.\/setup\.sh/)).toBeInTheDocument();
+  });
+
+  it("opens a stack explainer inline from the world overview", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="/app" element={<WorldRoute />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await user.click(screen.getByRole("button", { name: "Nostr" }));
+
+    expect(screen.queryByRole("dialog", { name: "Nostr" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Nostr" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/nostr lets you store your social data across multiple backends/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "https://github.com/nostr-protocol/nostr" })).toHaveAttribute(
+      "href",
+      "https://github.com/nostr-protocol/nostr"
+    );
+
+    await user.click(screen.getByRole("button", { name: "Nostr" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Nostr" })).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText(/nostr handles identity and social data/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("lets the world overview card fill the right-panel container", () => {
+    const cardRule = findStyleRule(".world-manifesto-card");
+    const panelRule = findStyleRule(".world-manifesto-panel");
+
+    expect(cardRule).not.toBeNull();
+    expect(panelRule).not.toBeNull();
+    expect(cardRule?.style.getPropertyValue("flex")).toBe("1 1 auto");
+    expect(cardRule?.style.getPropertyValue("height")).toBe("100%");
+    expect(cardRule?.style.getPropertyValue("min-height")).toBe("0");
+    expect(panelRule?.style.getPropertyValue("overflow")).toBe("hidden");
   });
 
   it("opens the right panel when the map marker is selected", () => {
@@ -427,10 +545,13 @@ describe("WorldRoute", () => {
     );
 
     expect(screen.getByRole("separator", { name: "Resize world panels" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/world overview/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /marker select/i }));
 
     expect(screen.getByTestId("selected-geohash")).toHaveTextContent("9q8yyk12");
+    expect(screen.getByRole("separator", { name: "Resize world panels" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/world overview/i)).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText(/message sfv founders/i)).toBeInTheDocument();
   });
 
@@ -521,17 +642,21 @@ describe("WorldRoute", () => {
     fireEvent.change(screen.getByLabelText(/^name$/i), {
       target: { value: "Lantern Point" }
     });
+    expect(screen.queryByRole("button", { name: /remove picture/i })).not.toBeInTheDocument();
     await user.upload(
       screen.getByLabelText(/upload image/i),
       new File(["image"], "beacon.png", { type: "image/png" })
     );
     await waitFor(() => expect(uploadBeaconPicture).toHaveBeenCalledTimes(1));
+    const picturePreview = screen.getByAltText(/beacon picture preview/i);
+    const removePictureButton = screen.getByRole("button", { name: /remove picture/i });
+    const pictureRow = picturePreview.closest(".world-beacon-picture-row");
+    expect(pictureRow).not.toBeNull();
+    expect(pictureRow).toContainElement(removePictureButton);
     fireEvent.change(screen.getByLabelText(/^about$/i), {
       target: { value: "Meet after sunset." }
     });
-    fireEvent.change(screen.getByLabelText(/^tags$/i), {
-      target: { value: "cohort, curriculum:zero-to-hero, level:beginner, hybrid" }
-    });
+    expect(screen.queryByLabelText(/^tags$/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^light beacon$/i }));
 
     await waitFor(() =>
@@ -539,7 +664,7 @@ describe("WorldRoute", () => {
         name: "Lantern Point",
         picture: "https://example.com/beacon.png",
         about: "Meet after sunset.",
-        tags: ["cohort", "curriculum:zero-to-hero", "level:beginner", "hybrid"]
+        tags: []
       })
     );
 
@@ -589,6 +714,33 @@ describe("WorldRoute", () => {
       expect(liveIndicator.compareDocumentPosition(about) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(within(beaconCard).queryByText("Scout")).not.toBeInTheDocument();
       expect(within(beaconCard).queryByText(/npub1scout/i)).not.toBeInTheDocument();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("prefers active call participants over broader place presence for the marker live count", () => {
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(new Date("2026-03-22T20:01:05.000Z").getTime());
+    activeCall = createActiveCall({ participantPubkeys: ["npub1scout"] });
+    beaconTiles = [
+      {
+        ...beaconTiles[0],
+        participants: ["npub1scout", "npub1aurora"]
+      }
+    ];
+
+    try {
+      render(
+        <MemoryRouter initialEntries={["/app"]}>
+          <Routes>
+            <Route path="/app" element={<WorldRoute />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      const beaconCard = screen.getByLabelText(/beacon card sfv founders/i);
+      expect(within(beaconCard).getByText("1 LIVE - 01:05")).toBeInTheDocument();
+      expect(within(beaconCard).queryByText("2 LIVE - 01:05")).not.toBeInTheDocument();
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -666,7 +818,7 @@ describe("WorldRoute", () => {
     expect(within(header as HTMLElement).queryByText(/^sfv founders$/i)).not.toBeInTheDocument();
   });
 
-  it("renders a settings action to the left of join call in the right-panel header", () => {
+  it("renders people and beacon settings actions to the left of join call in the right-panel header", () => {
     render(
       <MemoryRouter initialEntries={["/app?beacon=9q8yyk12"]}>
         <Routes>
@@ -678,14 +830,15 @@ describe("WorldRoute", () => {
     const header = screen.getByRole("button", { name: /join call/i }).closest(".world-chat-header");
     expect(header).not.toBeNull();
 
-    const actions = within(header as HTMLElement).getByRole("link", { name: /open settings/i }).closest(".world-chat-header-actions");
+    const actions = within(header as HTMLElement).getByRole("button", { name: /open people/i }).closest(".world-chat-header-actions");
     expect(actions).not.toBeNull();
 
-    const settingsLink = within(actions as HTMLElement).getByRole("link", { name: /open settings/i });
+    const peopleButton = within(actions as HTMLElement).getByRole("button", { name: /open people/i });
+    const settingsButton = within(actions as HTMLElement).getByRole("button", { name: /open beacon settings/i });
     const joinButton = within(actions as HTMLElement).getByRole("button", { name: /join call/i });
 
-    expect(settingsLink).toHaveAttribute("href", "/app/settings");
-    expect(Array.from((actions as HTMLElement).children)).toEqual([settingsLink, joinButton]);
+    expect(within(actions as HTMLElement).queryByRole("link", { name: /open settings/i })).not.toBeInTheDocument();
+    expect(Array.from((actions as HTMLElement).children)).toEqual([peopleButton, settingsButton, joinButton]);
   });
 
   it("swaps the join action to leave call for the active beacon room", async () => {
@@ -709,12 +862,27 @@ describe("WorldRoute", () => {
   });
 
   it("renders beacon call media above the text chat when the selected room is active", () => {
+    const attachScreenshareTrack = vi.fn((element: HTMLMediaElement) => element);
+    const detachScreenshareTrack = vi.fn((element: HTMLMediaElement) => element);
+
     activeCall = createActiveCall({
       roomID: "geo:npub1operator:9q8yyk12",
       participantPubkeys: ["npub1scout", "npub1operator"],
       participantStates: [
-        { pubkey: "npub1scout", mic: true, cam: false, screenshare: false },
-        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false }
+        { pubkey: "npub1scout", mic: true, cam: false, screenshare: false, isSpeaking: false },
+        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false, isSpeaking: false }
+      ],
+      mediaStreams: [
+        {
+          id: "npub1operator:screen_share",
+          pubkey: "npub1operator",
+          source: "screen_share",
+          isLocal: false,
+          track: {
+            attach: attachScreenshareTrack,
+            detach: detachScreenshareTrack
+          }
+        }
       ]
     });
 
@@ -732,8 +900,12 @@ describe("WorldRoute", () => {
     expect(mediaRegion).toBeInTheDocument();
     expect(within(mediaRegion).getByLabelText(/scout camera stream/i)).toBeInTheDocument();
     expect(within(mediaRegion).getByLabelText(/relay operator camera stream/i)).toBeInTheDocument();
+    expect(within(mediaRegion).getByLabelText(/relay operator screen share stream/i)).toBeInTheDocument();
     expect(messageList).not.toBeNull();
     expect(mediaRegion.compareDocumentPosition(messageList as HTMLElement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(attachScreenshareTrack).toHaveBeenCalledWith(
+      within(mediaRegion).getByLabelText(/relay operator screen share preview/i)
+    );
   });
 
   it("uses the active call room id for host controls even when it differs from the beacon projection", async () => {
@@ -748,8 +920,8 @@ describe("WorldRoute", () => {
       roomID: "geo:npub1operator:9q8yyk12",
       participantPubkeys: ["npub1operator", "npub1guest"],
       participantStates: [
-        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false },
-        { pubkey: "npub1guest", mic: false, cam: false, screenshare: false }
+        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false, isSpeaking: false },
+        { pubkey: "npub1guest", mic: false, cam: false, screenshare: false, isSpeaking: false }
       ]
     });
     grantRoomPermission.mockResolvedValue({
@@ -794,8 +966,8 @@ describe("WorldRoute", () => {
     activeCall = createActiveCall({
       participantPubkeys: ["npub1operator", "npub1guest"],
       participantStates: [
-        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false },
-        { pubkey: "npub1guest", mic: false, cam: false, screenshare: false }
+        { pubkey: "npub1operator", mic: true, cam: false, screenshare: false, isSpeaking: false },
+        { pubkey: "npub1guest", mic: false, cam: false, screenshare: false, isSpeaking: false }
       ]
     });
     grantRoomPermission.mockResolvedValue({
@@ -847,6 +1019,59 @@ describe("WorldRoute", () => {
 
     expect(screen.getByTestId("route-location").textContent).toMatch(/^\/app\?beacon=9q8yyk12&focus=/);
     expect(screen.getByTestId("focus-request-key").textContent).toMatch(/\S+/);
+  });
+
+  it("returns to the map and clears the selected beacon on narrow screens when clicking the header avatar", async () => {
+    setViewportWidth(540);
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app?beacon=9q8yyk12"]}>
+        <Routes>
+          <Route path="/app" element={<><WorldRoute /><LocationProbe /></>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.queryByTestId("tile-geohashes")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show sfv founders on the map/i }));
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/app"));
+    expect(screen.getByTestId("selected-geohash")).toHaveTextContent("");
+    expect(screen.getByTestId("tile-geohashes")).toHaveTextContent("9q8yyk12");
+    expect(screen.queryByPlaceholderText(/message sfv founders/i)).not.toBeInTheDocument();
+  });
+
+  it("returns to the map and clears the selected beacon on narrow screens when the route returns to /app", async () => {
+    setViewportWidth(540);
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/app?beacon=9q8yyk12"]}>
+        <Routes>
+          <Route
+            path="/app"
+            element={
+              <>
+                <WorldRoute />
+                <LocationProbe />
+                <NavigateToWorldButton />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.queryByTestId("tile-geohashes")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "World tab" }));
+
+    await waitFor(() => expect(screen.getByTestId("route-location")).toHaveTextContent("/app"));
+    expect(screen.getByTestId("selected-geohash")).toHaveTextContent("");
+    expect(screen.getByTestId("tile-geohashes")).toHaveTextContent("9q8yyk12");
+    expect(screen.queryByPlaceholderText(/message sfv founders/i)).not.toBeInTheDocument();
   });
 
   it("submits a new beacon message from the right panel with Enter and removes the send button", () => {
@@ -966,7 +1191,7 @@ describe("WorldRoute", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getAllByRole("link", { name: /scout/i })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /scout/i })).toHaveLength(1);
     expect(screen.getAllByText("npub1scout").length).toBeGreaterThan(0);
     expect(screen.getByText("First message")).toBeInTheDocument();
     expect(screen.getByText("Second message")).toBeInTheDocument();
@@ -1008,8 +1233,9 @@ describe("WorldRoute", () => {
 
     const messageRow = screen.getByText("Meet by the fountain.").closest(".world-chat-message");
     expect(messageRow).not.toBeNull();
-    expect(within(messageRow as HTMLElement).getByRole("button", { name: /^react$/i })).toBeInTheDocument();
-    expect(within(messageRow as HTMLElement).getByRole("button", { name: /^reply$/i })).toBeInTheDocument();
+    const [reactButton, replyButton] = within(messageRow as HTMLElement).getAllByRole("button", { hidden: true });
+    expect(reactButton).toHaveTextContent(/^react$/i);
+    expect(replyButton).toHaveTextContent(/^reply$/i);
   });
 
   it("opens an emoji picker and publishes a reaction from the beacon thread", async () => {
@@ -1026,7 +1252,8 @@ describe("WorldRoute", () => {
     const messageRow = screen.getByText("Meet by the fountain.").closest(".world-chat-message");
     expect(messageRow).not.toBeNull();
 
-    await user.click(within(messageRow as HTMLElement).getByRole("button", { name: /^react$/i }));
+    const [reactButton] = within(messageRow as HTMLElement).getAllByRole("button", { hidden: true });
+    fireEvent.click(reactButton);
     await user.click(screen.getByRole("button", { name: /react with 🔥/i }));
 
     expect(reactToPlaceNote).toHaveBeenCalledWith("note-1", "🔥");
@@ -1046,7 +1273,8 @@ describe("WorldRoute", () => {
     const messageRow = screen.getByText("Meet by the fountain.").closest(".world-chat-message");
     expect(messageRow).not.toBeNull();
 
-    await user.click(within(messageRow as HTMLElement).getByRole("button", { name: /^reply$/i }));
+    const [, replyButton] = within(messageRow as HTMLElement).getAllByRole("button", { hidden: true });
+    fireEvent.click(replyButton);
     expect(screen.getByLabelText(/reply target/i)).toHaveTextContent(/replying to scout/i);
 
     await user.type(screen.getByPlaceholderText(/message sfv founders/i), "On my way{enter}");

@@ -1,6 +1,7 @@
 import {
   createEphemeralPlace,
   getPlaceParticipantPubkeys,
+  isConnectedLiveKitCall,
   resolveRoomID,
   sortNotesByRecency,
   type CallSession,
@@ -68,9 +69,10 @@ export function buildBeaconProjection(
   profiles: ParticipantProfile[],
   operatorPubkey: string
 ): BeaconProjection {
+  const connectedActiveCall = isConnectedLiveKitCall(activeCall) ? activeCall : null;
   const effectivePlaces =
-    activeCall && !places.some((place) => place.geohash === activeCall.geohash)
-      ? [createEphemeralPlace(activeCall.geohash), ...places]
+    connectedActiveCall && !places.some((place) => place.geohash === connectedActiveCall.geohash)
+      ? [createEphemeralPlace(connectedActiveCall.geohash), ...places]
       : places;
 
   const notesByGeohash = new Map<string, GeoNote[]>();
@@ -91,7 +93,7 @@ export function buildBeaconProjection(
   const threads: BeaconThread[] = [];
 
   for (const place of effectivePlaces) {
-    const participants = getPlaceParticipantPubkeys(place, activeCall, currentPubkey);
+    const participants = getPlaceParticipantPubkeys(place, connectedActiveCall, currentPubkey);
     const memberPubkeys = dedupePubkeys([place.ownerPubkey, ...(place.memberPubkeys ?? [])]);
     const sortedNotes = notesByGeohash.get(place.geohash) ?? [];
     const pinnedNote = place.pinnedNoteId ? sortedNotes.find((note) => note.id === place.pinnedNoteId) : undefined;
@@ -100,7 +102,7 @@ export function buildBeaconProjection(
     const name = place.title.trim() || `Beacon ${place.geohash}`;
     const about = resolveBeaconAbout(place);
     const roomID = resolveRoomID(place.geohash, operatorPubkey);
-    const live = activeCall?.geohash === place.geohash || participants.length > 0;
+    const live = connectedActiveCall?.geohash === place.geohash || participants.length > 0;
 
     participantPubkeysByGeohash.set(place.geohash, participants);
 
